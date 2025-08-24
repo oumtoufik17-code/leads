@@ -847,225 +847,247 @@ from datetime import datetime
 
 @app.route("/process", methods=["GET"])
 def trigger_process():
+    # Get the token from the query parameters
     token = request.args.get("token")
-    if token != os.environ.get("PROCESS_SECRET_TOKEN"):
-        return jsonify({"error": "Unauthorized"}), 401
-# ── 0) DAILY RESET CHECK ──
-    today_str = date.today().isoformat()
-    rl_row = SUPABASE_SERVICE.table("rate_limit_reset") \
-        .select("last_reset") \
-        .eq("id", "global") \
-        .single() \
-        .execute().data or {}
-    last_date = rl_row.get("last_reset", "")[:10]  # e.g. "2025-07-27"
-
-    if last_date != today_str:
-        app.logger.info("🔄 New day detected – clearing emails table")
-
-        # Delete all rows by filtering out a UUID value that never exists
-        SUPABASE_SERVICE.table("emails") \
-            .delete() \
-            .neq("id", "00000000-0000-0000-0000-000000000000") \
-            .execute()
-
-        # Update the reset timestamp
-        SUPABASE_SERVICE.table("rate_limit_reset") \
-            .update({"last_reset": datetime.now(timezone.utc).isoformat()}) \
-            .eq("id", "global") \
-            .execute()
-
+    
+    # Get the expected token from environment variables
+    expected_token = os.environ.get("PROCESS_SECRET_TOKEN")
+    
+    # Log the request for debugging
+    app.logger.info(f"Process endpoint called with token: {token is not None}")
+    app.logger.info(f"Expected token is set: {expected_token is not None}")
+    
+    # Check if the expected token is configured
+    if not expected_token:
+        app.logger.error("PROCESS_SECRET_TOKEN environment variable is not set")
+        return jsonify({"error": "Server configuration error"}), 500
         
-    # ── 0) Build per-user counts of emails already sent today (YYYY‑MM‑DD) ──
-    today_iso = datetime.utcnow().date().isoformat()
-    sent_rows = (
-        supabase.table("emails")
-                .select("user_id, sent_at")
-                .eq("status", "sent")
+    # Check if the provided token matches the expected token
+    if token != expected_token:
+        app.logger.warning(f"Invalid token received. Expected: {expected_token[:5]}..., Got: {token}")
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    app.logger.info("Token validation successful, starting processing")
+    
+    try:
+        # ── 0) DAILY RESET CHECK ──
+        today_str = date.today().isoformat()
+        rl_row = SUPABASE_SERVICE.table("rate_limit_reset") \
+            .select("last_reset") \
+            .eq("id", "global") \
+            .single() \
+            .execute().data or {}
+        last_date = rl_row.get("last_reset", "")[:10]  # e.g. "2025-07-27"
+
+        if last_date != today_str:
+            app.logger.info("🔄 New day detected – clearing emails table")
+
+            # Delete all rows by filtering out a UUID value that never exists
+            SUPABASE_SERVICE.table("emails") \
+                .delete() \
+                .neq("id", "00000000-0000-0000-0000-000000000000") \
                 .execute()
-                .data or []
-    )
-    emails_sent_today: dict[str,int] = {}
-    for r in sent_rows:
-        sent_at = r.get("sent_at","")
-        if sent_at.startswith(today_iso):
-            uid = r["user_id"]
-            emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
 
-    # ── 1) Fetch the three pre‑send queues ──
-    gen  = supabase.table("emails").select("id").eq("status", "processing").execute().data or []
-    per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
-    prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
+            # Update the reset timestamp
+            SUPABASE_SERVICE.table("rate_limit_reset") \
+                .update({"last_reset": datetime.now(timezone.utc).isoformat()}) \
+                .eq("id", "global") \
+                .execute()
 
-    if not (gen or per or prop):
-        app.logger.info("⚡ No emails to process — returning 204")
-        return "", 204
+        # ── 0) Build per-user counts of emails already sent today (YYYY‑MM‑DD) ──
+        today_iso = datetime.utcnow().date().isoformat()
+        sent_rows = (
+            supabase.table("emails")
+                    .select("user_id, sent_at")
+                    .eq("status", "sent")
+                    .execute()
+                    .data or []
+        )
+        emails_sent_today: dict[str,int] = {}
+        for r in sent_rows:
+            sent_at = r.get("sent_at","")
+            if sent_at.startswith(today_iso):
+                uid = r["user_id"]
+                emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
 
-    all_processed, sent, drafted, failed = [], [], [], []
+        # ── 1) Fetch the three pre‑send queues ──
+        gen  = supabase.table("emails").select("id").eq("status", "processing").execute().data or []
+        per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
+        prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
 
-    # ── 2) Generate Response ──
-    if gen:
-        ids = [r["id"] for r in gen]
-        if call_edge("/functions/v1/clever-service/generate-response", {"email_ids": ids}):
-            all_processed.extend(ids)
-        else:
-            supabase.table("emails")\
-                    .update({"status":"error","error_message":"generate-response failed"})\
-                    .in_("id", ids).execute()
+        if not (gen or per or prop):
+            app.logger.info("⚡ No emails to process — returning 204")
+            return "", 204
 
-    # ── 3) Personalize Template ──
-    if per:
-        for eid in [r["id"] for r in per]:
-            if call_edge("/functions/v1/clever-service/personalize-template", {"email_ids":[eid]}):
-                supabase.table("emails").update({"status":"awaiting_proposal"}).eq("id", eid).execute()
-                all_processed.append(eid)
+        all_processed, sent, drafted, failed = [], [], [], []
+
+        # ── 2) Generate Response ──
+        if gen:
+            ids = [r["id"] for r in gen]
+            if call_edge("/functions/v1/clever-service/generate-response", {"email_ids": ids}):
+                all_processed.extend(ids)
             else:
                 supabase.table("emails")\
-                        .update({"status":"error","error_message":"personalize-template failed"})\
-                        .eq("id", eid).execute()
+                        .update({"status":"error","error_message":"generate-response failed"})\
+                        .in_("id", ids).execute()
 
-    # ── 4) Generate Proposal → ready_to_send ──
-    if prop:
-        for eid in [r["id"] for r in prop]:
-            if call_edge("/functions/v1/clever-service/generate-proposal", {"email_ids":[eid]}):
-                supabase.table("emails").update({"status":"ready_to_send"}).eq("id", eid).execute()
-                all_processed.append(eid)
-            else:
-                supabase.table("emails")\
-                        .update({"status":"error","error_message":"generate-proposal failed"})\
-                        .eq("id", eid).execute()
+        # ── 3) Personalize Template ──
+        if per:
+            for eid in [r["id"] for r in per]:
+                if call_edge("/functions/v1/clever-service/personalize-template", {"email_ids":[eid]}):
+                    supabase.table("emails").update({"status":"awaiting_proposal"}).eq("id", eid).execute()
+                    all_processed.append(eid)
+                else:
+                    supabase.table("emails")\
+                            .update({"status":"error","error_message":"personalize-template failed"})\
+                            .eq("id", eid).execute()
 
-    # ── 5) Re‑fetch ready_to_send rows ──
-    ready = (
-        supabase.table("emails")
-                .select("id, user_id, sender_email, processed_content, subject")
-                .eq("status", "ready_to_send")
-                .execute()
-                .data or []
-    )
+        # ── 4) Generate Proposal → ready_to_send ──
+        if prop:
+            for eid in [r["id"] for r in prop]:
+                if call_edge("/functions/v1/clever-service/generate-proposal", {"email_ids":[eid]}):
+                    supabase.table("emails").update({"status":"ready_to_send"}).eq("id", eid).execute()
+                    all_processed.append(eid)
+                else:
+                    supabase.table("emails")\
+                            .update({"status":"error","error_message":"generate-proposal failed"})\
+                            .eq("id", eid).execute()
+
+        # ── 5) Re‑fetch ready_to_send rows ──
+        ready = (
+            supabase.table("emails")
+                    .select("id, user_id, sender_email, processed_content, subject")
+                    .eq("status", "ready_to_send")
+                    .execute()
+                    .data or []
+        )
 
         # ── 6) Send via SMTP fallback or Gmail API, enforcing 20/day cap ──
-    for rec in ready:
-        em_id     = rec["id"]
-        uid       = rec["user_id"]
-        to_addr   = rec["sender_email"]
-        subject   = rec.get("subject", "Your Email")  # Get the original subject or default
+        for rec in ready:
+            em_id     = rec["id"]
+            uid       = rec["user_id"]
+            to_addr   = rec["sender_email"]
+            subject   = rec.get("subject", "Your Email")  # Get the original subject or default
 
+            # load personalization flags & build HTML
+            lease_flag = supabase.table("profiles") \
+                                 .select("generate_leases") \
+                                 .eq("id", uid).single().execute().data.get("generate_leases", False)
+            body_html = (rec.get("processed_content") or "").replace("\n", "<br>")
+            prof_sig = supabase.table("profiles") \
+                               .select("display_name, signature") \
+                               .eq("id", uid).single().execute().data or {}
+            if prof_sig.get("display_name"):
+                body_html = body_html.replace("[Your Name]", prof_sig["display_name"])
+            full_html = f"<html><body><p>{body_html}</p>{prof_sig.get('signature','')}</body></html>"
 
-        # load personalization flags & build HTML
-        lease_flag = supabase.table("profiles") \
-                             .select("generate_leases") \
-                             .eq("id", uid).single().execute().data.get("generate_leases", False)
-        body_html = (rec.get("processed_content") or "").replace("\n", "<br>")
-        prof_sig = supabase.table("profiles") \
-                           .select("display_name, signature") \
-                           .eq("id", uid).single().execute().data or {}
-        if prof_sig.get("display_name"):
-            body_html = body_html.replace("[Your Name]", prof_sig["display_name"])
-        full_html = f"<html><body><p>{body_html}</p>{prof_sig.get('signature','')}</body></html>"
-
-        # 20-email/day limit
-        if emails_sent_today.get(uid, 0) >= 20:
-            app.logger.info(f"User {uid} reached daily limit, marking {em_id} error")
-            supabase.table("emails").update({
-                "status": "error",
-                "error_message": "Daily email limit reached"
-            }).eq("id", em_id).execute()
-            failed.append(em_id)
-            continue
-
-        # 1) SMTP fallback
-        prof = supabase.table("profiles") \
-                       .select("smtp_email,smtp_enc_password,smtp_host") \
-                       .eq("id", uid).single().execute().data or {}
-        if prof.get("smtp_email") and prof.get("smtp_enc_password"):
-            smtp_email = prof["smtp_email"]
-            smtp_pass  = fernet.decrypt(prof["smtp_enc_password"].encode()).decode()
-            smtp_host  = prof.get("smtp_host", "smtp.gmail.com")
-            try:
-                send_email_smtp(
-                    smtp_email,
-                    smtp_pass,
-                    to_addr,
-                    "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}",  # Modified subject,
-                    full_html,
-                    smtp_host=smtp_host
-                )
+            # 20-email/day limit
+            if emails_sent_today.get(uid, 0) >= 20:
+                app.logger.info(f"User {uid} reached daily limit, marking {em_id} error")
                 supabase.table("emails").update({
-                    "status":  "sent",
+                    "status": "error",
+                    "error_message": "Daily email limit reached"
+                }).eq("id", em_id).execute()
+                failed.append(em_id)
+                continue
+
+            # 1) SMTP fallback
+            prof = supabase.table("profiles") \
+                           .select("smtp_email,smtp_enc_password,smtp_host") \
+                           .eq("id", uid).single().execute().data or {}
+            if prof.get("smtp_email") and prof.get("smtp_enc_password"):
+                smtp_email = prof["smtp_email"]
+                smtp_pass  = fernet.decrypt(prof["smtp_enc_password"].encode()).decode()
+                smtp_host  = prof.get("smtp_host", "smtp.gmail.com")
+                try:
+                    send_email_smtp(
+                        smtp_email,
+                        smtp_pass,
+                        to_addr,
+                        "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}",  # Modified subject,
+                        full_html,
+                        smtp_host=smtp_host
+                    )
+                    supabase.table("emails").update({
+                        "status":  "sent",
+                        "sent_at": datetime.utcnow().isoformat()
+                    }).eq("id", em_id).execute()
+                    emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
+                    sent.append(em_id)
+                    app.logger.info(f"SMTP send succeeded for email {em_id} (user {uid})")
+                except Exception as e:
+                    app.logger.error(f"SMTP send failed for email {em_id} (user {uid})", exc_info=True)
+                    supabase.table("emails").update({
+                        "status":        "error",
+                        "error_message": str(e)
+                    }).eq("id", em_id).execute()
+                    failed.append(em_id)
+                continue  # next `rec`
+
+            # 2) Gmail API fallback
+            try:
+                tok = supabase.table("gmail_tokens") \
+                              .select("credentials") \
+                              .eq("user_id", uid).single().execute().data
+                if not tok:
+                    raise ValueError("No Gmail token found")
+
+                cd = tok["credentials"]
+                creds = Credentials(
+                    token=cd["token"],
+                    refresh_token=cd["refresh_token"],
+                    token_uri=cd["token_uri"],
+                    client_id=cd["client_id"],
+                    client_secret=cd["client_secret"],
+                    scopes=cd["scopes"],
+                )
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(GoogleRequest())
+
+                svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
+                msg = MIMEText(full_html, "html")
+                msg["to"]      = to_addr
+                msg["from"]    = "me"
+                msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get("subject", "Your Email")}"  # Modified subject
+                raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+                if lease_flag:
+                    svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+                    status_to = "drafted"
+                    drafted.append(em_id)
+                else:
+                    svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+                    status_to = "sent"
+                    sent.append(em_id)
+
+                supabase.table("emails").update({
+                    "status":  status_to,
                     "sent_at": datetime.utcnow().isoformat()
                 }).eq("id", em_id).execute()
                 emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
-                sent.append(em_id)
-                app.logger.info(f"SMTP send succeeded for email {em_id} (user {uid})")
+                app.logger.info(f"Gmail API send succeeded for email {em_id} (user {uid})")
+
             except Exception as e:
-                app.logger.error(f"SMTP send failed for email {em_id} (user {uid})", exc_info=True)
+                app.logger.error(f"Gmail API send failed for email {em_id} (user {uid})", exc_info=True)
                 supabase.table("emails").update({
                     "status":        "error",
                     "error_message": str(e)
                 }).eq("id", em_id).execute()
                 failed.append(em_id)
-            continue  # next `rec`
 
-        # 2) Gmail API fallback
-        try:
-            tok = supabase.table("gmail_tokens") \
-                          .select("credentials") \
-                          .eq("user_id", uid).single().execute().data
-            if not tok:
-                raise ValueError("No Gmail token found")
+        # ── Summary response ──
+        summary = {
+            "processed": all_processed,
+            "sent":      sent,
+            "drafted":   drafted,
+            "failed":    failed
+        }
+        app.logger.info(f"Processing completed. Summary: {summary}")
+        return jsonify(summary), 200
 
-            cd = tok["credentials"]
-            creds = Credentials(
-                token=cd["token"],
-                refresh_token=cd["refresh_token"],
-                token_uri=cd["token_uri"],
-                client_id=cd["client_id"],
-                client_secret=cd["client_secret"],
-                scopes=cd["scopes"],
-            )
-            if creds.expired and creds.refresh_token:
-                creds.refresh(GoogleRequest())
-
-            svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
-            msg = MIMEText(full_html, "html")
-            msg["to"]      = to_addr
-            msg["from"]    = "me"
-            msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}"  # Modified subject
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-            if lease_flag:
-                svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-                status_to = "drafted"
-                drafted.append(em_id)
-            else:
-                svc.users().messages().send(userId="me", body={"raw": raw}).execute()
-                status_to = "sent"
-                sent.append(em_id)
-
-            supabase.table("emails").update({
-                "status":  status_to,
-                "sent_at": datetime.utcnow().isoformat()
-            }).eq("id", em_id).execute()
-            emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
-            app.logger.info(f"Gmail API send succeeded for email {em_id} (user {uid})")
-
-        except Exception as e:
-            app.logger.error(f"Gmail API send failed for email {em_id} (user {uid})", exc_info=True)
-            supabase.table("emails").update({
-                "status":        "error",
-                "error_message": str(e)
-            }).eq("id", em_id).execute()
-            failed.append(em_id)
-
-    # ── Summary response ──
-    summary = {
-        "processed": all_processed,
-        "sent":      sent,
-        "drafted":   drafted,
-        "failed":    failed
-    }
-    return jsonify(summary), 200
-
+    except Exception as e:
+        app.logger.error(f"Error in process endpoint: {str(e)}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
 
 # ── Final entry point ──
 if __name__ == "__main__":
