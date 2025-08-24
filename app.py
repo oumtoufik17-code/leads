@@ -1041,10 +1041,10 @@ def trigger_process():
                         "status":        "error",
                         "error_message": str(e)
                     }).eq("id", em_id).execute()
-                   # Added closing parenthesis here ↑
-            continue
-          
-          # 2) Gmail API fallback
+                    failed.append(em_id)
+                continue  # next `rec`
+
+            # 2) Gmail API fallback
             try:
                 tok = supabase.table("gmail_tokens") \
                               .select("credentials") \
@@ -1076,7 +1076,7 @@ def trigger_process():
                     status_to = "drafted"
                     drafted.append(em_id)
                 else:
-                    svc.users().messages().send(userId="me", body={"raw": raw}}).execute()
+                    svc.users().messages().send(userId="me", body={"raw": raw}).execute()
                     status_to = "sent"
                     sent.append(em_id)
 
