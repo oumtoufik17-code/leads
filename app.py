@@ -118,14 +118,14 @@ def dashboard():
     user_id = request.args.get("user_id", "").strip()
 
     # ── GUEST DEFAULTS ──
-    name            = "Guest"
-    ai_enabled      = False
-    generate_leases = False
-    emails_sent     = 0
-    time_saved      = 0
-    show_reconnect  = False
-    revenue         = 0
-    revenue_change  = 0
+   # name            = "Guest"
+    #ai_enabled      = False
+   # generate_leases = False
+#    emails_sent     = 0
+ #   time_saved      = 0
+  #  show_reconnect  = False
+   # revenue         = 0
+    #revenue_change  = 0
 
     # Ensure these always exist for the template
     #kits_generated = 0
@@ -206,19 +206,19 @@ def dashboard():
        # estimated_saved = kits_generated * PER_KIT_SAVE_MINUTES
 
     # ── Render dashboard ──
-    return render_template(
-        "dashboard.html",
-        user_id=user_id,
-        name=name,
-        ai_enabled=ai_enabled,
-        generate_leases=generate_leases,
-        emails_sent=emails_sent,
-        time_saved=time_saved,
-        estimated_saved=estimated_saved,
-        kits_generated=kits_generated,
-        show_reconnect=show_reconnect,
-        revenue=revenue,
-        revenue_change=revenue_change
+   # return render_template(
+#        "dashboard.html",
+ #       user_id=user_id,
+  #      name=name,
+   #     ai_enabled=ai_enabled,
+    #    generate_leases=generate_leases,
+     #   emails_sent=emails_sent,
+      #  time_saved=time_saved,
+       # estimated_saved=estimated_saved,
+       # kits_generated=kits_generated,
+       # show_reconnect=show_reconnect,
+        #revenue=revenue,
+       # revenue_change=revenue_change
     )
 
 
