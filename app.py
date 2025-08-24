@@ -113,115 +113,234 @@ def home():
 
 
 
+@app.route("/dashboard")
+def dashboard():
+    user_id = request.args.get("user_id", "").strip()
 
-# New routes for SMTP management
-@app.route("/connect_smtp_form", methods=["GET"])
-def connect_smtp_form():
-    user_id = request.args.get("user_id")
-    return render_template("partials/connect_smtp_form.html", user_id=user_id)
+    # ── GUEST DEFAULTS ──
+    name            = "Guest"
+    ai_enabled      = False
+    generate_leases = False
+    emails_sent     = 0
+    time_saved      = 0
+    show_reconnect  = False
+    revenue         = 0
+    revenue_change  = 0
 
-@app.route("/disconnect_smtp", methods=["POST"])
-def disconnect_smtp():
-    user_id = request.form.get("user_id")
-    supabase.table("profiles").update({
-        "smtp_email": None,
-        "smtp_enc_password": None,
-        "smtp_host": None,
-        "imap_host": None
-    }).eq("id", user_id).execute()
-    return redirect(f"/dashboard/settings?user_id={user_id}")
+    # Ensure these always exist for the template
+    kits_generated = 0
+    estimated_saved = 0
 
-@app.route("/dashboard/home")
-def dashboard_home():
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user_id", 401
-
-    # (Same logic as /dashboard for HTMX partial)
-    profile_resp = (
-        supabase.table("profiles")
-                .select("full_name, ai_enabled, email, generate_leases")
-                .eq("id", user_id)
-                .single()
-                .execute()
-    )
-    if profile_resp.data is None:
-        return "Profile query error", 500
-
-    profile         = profile_resp.data
-    full_name       = profile.get("full_name", "")
-    ai_enabled      = profile.get("ai_enabled", True)
-    generate_leases = profile.get("generate_leases", False)
-
-    today     = date.today().isoformat()
-    sent_rows = (
-        supabase.table("emails")
-                .select("sent_at")
-                .eq("user_id", user_id)
-                .eq("status", "sent")
-                .execute()
-                .data
-        or []
-    )
-    emails_sent_today = sum(1 for e in sent_rows if e.get("sent_at", "").startswith(today))
-    time_saved        = emails_sent_today * 5.5
-
-    token_rows = (
-        supabase.table("gmail_tokens")
-                .select("credentials")
-                .eq("user_id", user_id)
-                .execute()
-                .data
-        or []
-    )
-    show_reconnect = True
-    if token_rows:
-        creds_data = token_rows[0]["credentials"]
+    if user_id:
+        # 1) Load profile
         try:
+            resp = (
+                supabase.table("profiles")
+                         .select("full_name, ai_enabled, generate_leases")
+                         .eq("id", user_id)
+                         .single()
+                         .execute()
+            )
+            if resp.data:
+                name            = resp.data["full_name"]
+                ai_enabled      = resp.data["ai_enabled"]
+                generate_leases = resp.data["generate_leases"]
+        except Exception:
+            app.logger.warning(f"dashboard: failed to load profile for {user_id}")
+
+        # 2) Count today's emails
+        try:
+            today = date.today().isoformat()
+            rows  = (
+                supabase.table("emails")
+                        .select("sent_at")
+                        .eq("user_id", user_id)
+                        .eq("status", "sent")
+                        .execute()
+                        .data
+                or []
+            )
+            emails_sent = sum(1 for e in rows if e.get("sent_at","").startswith(today))
+            time_saved  = emails_sent * 5.5
+        except Exception:
+            app.logger.warning(f"dashboard: failed to count emails for {user_id}")
+
+        # 3) Gmail reconnect flag
+        try:
+            toks = (
+                supabase.table("gmail_tokens")
+                         .select("credentials")
+                         .eq("user_id", user_id)
+                         .execute()
+                         .data
+                or []
+            )
+            if toks:
+                cd = toks[0]["credentials"]
+                creds = Credentials(
+                    token=cd["token"],
+                    refresh_token=cd["refresh_token"],
+                    token_uri=cd["token_uri"],
+                    client_id=cd["client_id"],
+                    client_secret=cd["client_secret"],
+                    scopes=cd["scopes"],
+                )
+                show_reconnect = creds.expired
+        except Exception:
+            app.logger.warning(f"dashboard: failed to check Gmail token for {user_id}")
+
+        # 4) Count "kits generated" for this user
+        kit_rows = (
+            supabase.table("transactions")
+                     .select("id")
+                     .eq("user_id", user_id)
+                     .eq("kit_generated", True)
+                     .execute()
+                     .data
+            or []
+        )
+        kits_generated = len(kit_rows)
+
+        # 5) Compute extra estimated time saved (e.g. 15 min per kit)
+        PER_KIT_SAVE_MINUTES = 15
+        estimated_saved = kits_generated * PER_KIT_SAVE_MINUTES
+
+    # ── Render dashboard ──
+    return render_template(
+        "dashboard.html",
+        user_id=user_id,
+        name=name,
+        ai_enabled=ai_enabled,
+        generate_leases=generate_leases,
+        emails_sent=emails_sent,
+        time_saved=time_saved,
+        estimated_saved=estimated_saved,
+        kits_generated=kits_generated,
+        show_reconnect=show_reconnect,
+        revenue=revenue,
+        revenue_change=revenue_change
+    )
+
+@app.route("/dashboard/new_transaction")
+def dashboard_new_transaction():
+    user_id = request.args.get("user_id") or abort(401)
+    return render_template("partials/new_transaction.html", user_id=user_id)
+  
+@app.route("/dashboard/responded_emails")
+def dashboard_responded_emails():
+    user_id = request.args.get("user_id") or abort(401)
+    # Select emails for this user that were sent/drafted and that have an original_content field
+    try:
+        emails = (
+            supabase.table("emails")
+                    .select("id, sender_email, subject, original_content, status, sent_at")
+                    .eq("user_id", user_id)
+                    .in_("status", ["sent","drafted"])   # treat drafted as 'responded' if you want
+                    .order("sent_at", desc=True)
+                    .execute()
+                    .data
+            or []
+        )
+    except Exception:
+        app.logger.exception("failed to load responded emails")
+        emails = []
+
+    return render_template("partials/responded_emails.html", emails=emails, user_id=user_id)
+
+
+@app.route("/dashboard/email/<email_id>")
+def dashboard_email_view(email_id):
+    """Return a small partial showing full original_content — HTMX call for modal."""
+    try:
+        rec = supabase.table("emails").select("*").eq("id", email_id).single().execute().data
+    except Exception:
+        rec = None
+
+    if not rec:
+        return "<div class='chart-container'>Email not found.</div>", 404
+
+    return render_template("partials/email_modal.html", email=rec)
+
+
+@app.route("/dashboard/analytics")
+def dashboard_analytics():
+    user_id = _require_user()
+    return render_template("partials/analytics.html", user_id=user_id)
+
+@app.route("/dashboard/users")
+def dashboard_users():
+    user_id = _require_user()
+    users = supabase.table("profiles").select("id, full_name, email").execute().data or []
+    return render_template("partials/users.html", users=users)
+
+@app.route("/dashboard/billing")
+def dashboard_billing():
+    user_id = _require_user()
+    return render_template("partials/billing.html", user_id=user_id)
+
+@app.route("/dashboard/settings", methods=["GET", "POST"])
+def dashboard_settings():
+    user_id = _require_user()
+
+    # ─── Handle Profile POST ────────────────────────────────
+    if request.method == "POST":
+        section = request.form.get("section")
+        if section == "profile":
+            new_display_name = request.form.get("display_name", "").strip()
+            new_signature = request.form.get("signature", "").strip()
+            supabase.table("profiles").update({
+                "display_name": new_display_name,
+                "signature": new_signature
+            }).eq("id", user_id).execute()
+
+    # ─── Fetch profile & flags ──────────────────────────────
+    profile_resp = supabase.table("profiles") \
+                           .select("display_name, signature, ai_enabled, smtp_email") \
+                           .eq("id", user_id) \
+                           .single() \
+                           .execute()
+    
+    profile = profile_resp.data or {
+        "display_name": "",
+        "signature": "",
+        "ai_enabled": False,
+        "smtp_email": None
+    }
+
+    # ▶ Determine Gmail connection status
+    gmail_connected = False
+    show_reconnect = False
+    
+    try:
+        toks = supabase.table("gmail_tokens") \
+                       .select("credentials") \
+                       .eq("user_id", user_id) \
+                       .single() \
+                       .execute().data
+        if toks:
+            gmail_connected = True
+            creds_payload = toks["credentials"]
             creds = Credentials(
-                token=creds_data["token"],
-                refresh_token=creds_data["refresh_token"],
-                token_uri=creds_data["token_uri"],
-                client_id=creds_data["client_id"],
-                client_secret=creds_data["client_secret"],
-                scopes=creds_data["scopes"],
+                token=creds_payload["token"],
+                refresh_token=creds_payload["refresh_token"],
+                token_uri=creds_payload["token_uri"],
+                client_id=creds_payload["client_id"],
+                client_secret=creds_payload["client_secret"],
+                scopes=creds_payload["scopes"],
             )
             show_reconnect = creds.expired
-        except Exception:
-            pass
-    # 4) Count "kits generated" for this user
-# (Assuming you flag each transaction row with kit_generated=True)
-    kit_rows = (
-        supabase
-        .table("transactions")
-        .select("id")
-        .eq("user_id", user_id)
-        .eq("kit_generated", True)
-        .execute()
-        .data
-        or []
-    )
-    kits_generated = len(kit_rows)
+    except Exception:
+        app.logger.warning(f"settings: could not check Gmail token for {user_id}")
 
-    # 5) Compute extra estimated time saved
-    # e.g. you save ~15 minutes per generated kit
-    PER_KIT_SAVE_MINUTES = 15
-    estimated_saved = kits_generated * PER_KIT_SAVE_MINUTES
- 
-
-
+    # ▶ Render template
     return render_template(
-        "partials/home.html",
-        name=full_name,
+        "partials/settings.html",
+        profile=profile,
         user_id=user_id,
-        emails_sent=emails_sent_today,
-        time_saved=time_saved,
-        estimated_saved=estimated_saved,  # new computed value
-        kits_generated=kits_generated,      # new computed value
-        ai_enabled=ai_enabled,
-        show_reconnect=show_reconnect,
-        generate_leases=generate_leases,
+        gmail_connected=gmail_connected,
+        show_reconnect=show_reconnect
     )
+# New routes for SMTP management
 #----------------------------------------------------------------------
 @app.route("/reconnect_gmail")
 def reconnect_gmail():
