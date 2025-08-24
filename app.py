@@ -2,6 +2,7 @@ import os
 import time
 import base64
 import requests
+import uuid
 
 from flask import abort, Flask, render_template, request, redirect, jsonify, make_response, url_for
 from datetime import date, datetime, timezone
@@ -580,8 +581,13 @@ def fetch_mail():
 @app.route("/connect_gmail")
 def connect_gmail():
     """
-    Initiates Gmail OAuth flow.
+    Initiates Gmail OAuth flow. Must be called with ?user_id=<auth_user_id>.
+    This ensures the state returned by Google is the user's UUID.
     """
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return "Missing user_id. Call /connect_gmail?user_id=<your-supabase-user-id>", 400
+
     flow = Flow.from_client_config(
         {
             "web": {
@@ -601,23 +607,52 @@ def connect_gmail():
         ]
     )
     flow.redirect_uri = os.environ["REDIRECT_URI"]
-    authorization_url, _ = flow.authorization_url(
+
+    # Put the exact auth user id into 'state' (Google will echo it back)
+    authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent"
+        prompt="consent",
+        state=user_id
     )
+
+    # Optional: persist fallback in server-side session (if you enabled sessions)
+    try:
+        session["oauth_user_id"] = user_id
+        session["oauth_state"] = state
+    except Exception:
+        # session might not be configured—it's optional, we still continue
+        pass
+
     return redirect(authorization_url)
 
+
+# --- replace oauth2callback ---
 @app.route("/oauth2callback")
 def oauth2callback():
-    """Handles OAuth2 callback from Google"""
+    """Handles OAuth2 callback from Google with robust state handling."""
     try:
-        # Extract state parameter containing user_id
-        user_id = request.args.get("state")
-        if not user_id:
-            app.logger.error("OAuth2 callback missing state parameter")
-            return "<h1>Authentication Failed</h1><p>Missing state parameter</p>", 400
-        
+        # 1) Try to read state from Google
+        state = request.args.get("state")
+
+        # 2) If state missing or not a UUID, attempt to fall back to session
+        if not state:
+            try:
+                state = session.pop("oauth_user_id", None) or session.pop("oauth_state", None)
+            except Exception:
+                state = None
+
+        # 3) We'll accept state only if it's a valid UUID string (your profiles.id is UUID)
+        user_id = None
+        if state:
+            try:
+                # validate UUID format
+                uuid_obj = uuid.UUID(state)
+                user_id = str(uuid_obj)
+            except Exception:
+                user_id = None  # not a UUID, will try email-based lookup below
+
+        # Build flow for token exchange (state param optional here)
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -635,26 +670,45 @@ def oauth2callback():
                 "https://www.googleapis.com/auth/gmail.compose",
                 "openid"
             ],
-            state=user_id
+            state=state if state else None
         )
         flow.redirect_uri = os.environ["REDIRECT_URI"]
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
 
-        # Verify ID token
+        # Verify ID token and get the Gmail email address
         id_info = id_token.verify_oauth2_token(
             credentials.id_token,
             grequests.Request(),
             os.environ["GOOGLE_CLIENT_ID"]
         )
-        email = id_info.get("email")
-        if not email:
+        gmail_email = id_info.get("email")
+        if not gmail_email:
             raise ValueError("No email found in Google ID token")
 
-        # Upsert gmail tokens
+        # If we don't yet have a UUID user_id from state, try to find the profile by email
+        if not user_id:
+            # Use service role client to avoid RLS problems
+            try:
+                lookup = SUPABASE_SERVICE.table("profiles").select("id").eq("email", gmail_email).single().execute()
+                if lookup and lookup.data and lookup.data.get("id"):
+                    user_id = lookup.data["id"]
+            except Exception:
+                user_id = None
+
+        # If we still don't have a user_id, return a helpful error so the user re-connects properly
+        if not user_id:
+            msg = (
+                "Could not determine your user_id. Please initiate the Gmail connect flow "
+                "from your dashboard while signed in so the server can attach the account."
+            )
+            app.logger.error("OAuth2 callback: no user_id (state wasn't a UUID and no profile matched email)")
+            return f"<h1>Authentication Failed</h1><p>{msg}</p>", 400
+
+        # Upsert gmail tokens (we have user_id and gmail_email)
         creds_payload = {
             "user_id": user_id,
-            "user_email": email,
+            "user_email": gmail_email,
             "credentials": {
                 "token": credentials.token,
                 "refresh_token": credentials.refresh_token,
@@ -664,12 +718,12 @@ def oauth2callback():
                 "scopes": credentials.scopes
             }
         }
-        supabase.table("gmail_tokens").upsert(creds_payload).execute()
+        SUPABASE_SERVICE.table("gmail_tokens").upsert(creds_payload).execute()
 
-        # Update user profile
-        full_name = id_info.get("name") or email.split("@")[0]
-        supabase.table("profiles").update({
-            "email": email,
+        # Update user profile (use service role)
+        full_name = id_info.get("name") or gmail_email.split("@")[0]
+        SUPABASE_SERVICE.table("profiles").update({
+            "email": gmail_email,
             "full_name": full_name,
             "ai_enabled": True
         }).eq("id", user_id).execute()
@@ -677,8 +731,10 @@ def oauth2callback():
         return redirect(f"/dashboard?user_id={user_id}")
 
     except Exception as e:
-        app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
+        app.logger.exception("OAuth2 Callback Error")
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
+
+
 @app.route("/complete_profile", methods=["GET", "POST"])
 def complete_profile():
     user_id = request.args.get("user_id")
