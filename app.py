@@ -617,42 +617,6 @@ def connect_gmail():
     )
     return redirect(authorization_url)
 
-@app.route("/reconnect_gmail")
-def reconnect_gmail():
-    """Handles both initial connection and reconnection to Gmail"""
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user ID", 400
-
-    # Create a session to store the user_id
-    session['oauth_user_id'] = user_id
-    
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": os.environ["GOOGLE_CLIENT_ID"],
-                "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [os.environ["REDIRECT_URI"]]
-            }
-        },
-        scopes=[
-            "https://www.googleapis.com/auth/gmail.send",
-            "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/gmail.compose",
-            "openid"
-        ],
-        state=user_id  # Set state parameter
-    )
-    flow.redirect_uri = os.environ["REDIRECT_URI"]
-    authorization_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
-    )
-    return redirect(authorization_url)
 
 @app.route("/oauth2callback")
 def oauth2callback():
