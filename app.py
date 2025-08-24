@@ -35,8 +35,6 @@ def signin():
     user_id = request.args.get("user_id", "")
     return render_template("signin.html", user_id=user_id)
 #--------------------------------------------------------------
-app.register_blueprint(autopilot_bp, url_prefix="/autopilot")
-app.register_blueprint(public_bp)
 
 # --- Supabase setup ---
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -1073,118 +1071,6 @@ def trigger_process():
         "failed":    failed
     }
     return jsonify(summary), 200
-
-
-@app.route("/transaction/<txn_id>/ready", methods=["POST"])
-def mark_ready(txn_id):
-    supabase.table("transactions").update({"ready_for_kit": True}).eq("id", txn_id).execute()
-    return "", 204
-
-@app.route("/autopilot/batch", methods=["POST"])
-def batch_autopilot():
-    txns = supabase.table("transactions").select("*").eq("ready_for_kit", True).eq("kit_generated", False).execute().data or []
-    results = []
-    for t in txns:
-        payload = {
-          "transaction_type": t["transaction_type"],
-          "data": {
-            "id": t["id"],
-            "buyer": t["buyer"],
-            "seller": t["seller"],
-            "date": t["date"],
-            "purchase_price": t["purchase_price"],
-            "closing_date": t.get("closing_date"),
-            "closing_location": t.get("closing_location")
-          }
-        }
-        resp = requests.post(f"{os.environ.get('BASE_URL')}/autopilot/trigger", json=payload)
-        results.append({"id": t["id"], "status": resp.status_code})
-        if resp.ok:
-            supabase.table("transactions").update({"kit_generated": True}).eq("id", t["id"]).execute()
-    return jsonify(results), 200
-
-@app.route("/dashboard/autopilot")
-def dashboard_autopilot():
-    user_id = request.args.get("user_id") or abort(401)
-    txn_id  = request.args.get("txn_id")
-    transactions = supabase.table("transactions").select("*").eq("user_id", user_id).execute().data or []
-    current_txn = None
-    if txn_id:
-        resp = supabase.table("transactions").select("*").eq("id", txn_id).execute()
-        current_txn = resp.data[0] if resp.data else None
-    return render_template("partials/autopilot.html", user_id=user_id, transactions=transactions, current_transaction=current_txn)
-
-@app.route("/transactions/new", methods=["POST"])
-def create_transaction():
-    import uuid
-    import traceback
-
-    user_id = request.args.get("user_id") or request.form.get("user_id")
-    if not user_id:
-        return jsonify({"status": "error", "message": "Missing user_id"}), 401
-
-    new_id = str(uuid.uuid4())
-
-    # 🔐 Validate required fields (lowercase unified names)
-    required = ["buyer_name", "seller_name", "property_address", "agreement_date"]
-    missing = [f for f in required if not request.form.get(f)]
-    if missing:
-        app.logger.warning(f"⚠️ Missing required fields: {missing}")
-        return jsonify({
-            "status": "error",
-            "message": f"Missing required fields: {', '.join(missing)}"
-        }), 400
-
-    # ✅ All accepted lowercase fields from gamified form
-    accepted_fields = [
-        "transaction_type", "property_address", "city", "state", "name_of_property",
-        "description_of_property", "square_feet", "legal_description",
-        "apartment_address", "premises_description",
-
-        "buyer_name", "buyer_address", "seller_name", "seller_address", "agency_name",
-
-        "purchase_price", "deposit_amount", "agreement_date", "broker_name",
-        "commission_amount", "brokerage_fee", "broker_payday",
-
-        "closing_date", "occupy_property_date", "mortgage_amount", "mortgage_years",
-        "interest_rate", "inspection_days", "possession_date",
-
-        "rent_type", "agreed_rent", "maintenance_terms",
-
-        "landlord_phone", "tenant_phone", "landlord_email", "tenant_email",
-
-        "structure_age", "location", "county", "additional_explanations",
-
-        "buyer_signature", "seller_signature", "time"
-    ]
-
-    # Build the payload, turning empty strings into None
-    payload = {"id": new_id, "user_id": user_id}
-    for field in accepted_fields:
-        val = request.form.get(field)
-        payload[field] = None if val == "" else val
-
-    try:
-        app.logger.info(f"🚀 Inserting transaction with ID {new_id}")
-        app.logger.debug(f"Payload: {payload}")
-        resp = supabase.table("transactions").insert(payload).execute()
-        inserted = resp.data[0]
-    except Exception as e:
-        app.logger.error("❌ Transaction insert failed")
-        app.logger.error(traceback.format_exc())
-        return jsonify({
-            "status": "error",
-            "message": f"Insertion failed: {str(e)}"
-        }), 500
-
-    # ✅ Success response with htmx trigger
-    feedback = (
-        f'<div class="alert alert-success">🎉 Transaction <strong>{inserted["id"]}</strong> created.</div>'
-        + '<script>htmx.trigger(document.querySelector(\'[hx-get*="/dashboard/autopilot"]\'), "click")</script>'
-    )
-    return feedback, 200
-
-
 
 
 # ── Final entry point ──
