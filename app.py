@@ -1040,7 +1040,7 @@ def trigger_process():
                     supabase.table("emails").update({
                         "status":        "error",
                         "error_message": str(e)
-                    ).eq("id", em_id).execute()
+                    }).eq("id", em_id).execute()
                     failed.append(em_id)
                 continue  # next `rec`
 
