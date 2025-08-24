@@ -23,9 +23,7 @@ from flask_cors import CORS
 
 from cryptography.fernet import Fernet
 
-# bring in your Blueprints
-from transaction_autopilot import bp as autopilot_bp
-from public import public_bp
+
 
 # ── single Flask app & blueprint registration ──
 app = Flask(__name__, template_folder="templates")
