@@ -1041,10 +1041,10 @@ def trigger_process():
                         "status":        "error",
                         "error_message": str(e)
                     }).eq("id", em_id).execute()
-                    failed.append(em_id)
-                continue  # next `rec`
-
-            # 2) Gmail API fallback
+                   # Added closing parenthesis here ↑
+            continue
+          
+          # 2) Gmail API fallback
             try:
                 tok = supabase.table("gmail_tokens") \
                               .select("credentials") \
