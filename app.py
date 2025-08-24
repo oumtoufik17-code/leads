@@ -624,6 +624,18 @@ def oauth2callback():
             app.logger.error("OAuth2 callback missing state parameter")
             return "<h1>Authentication Failed</h1><p>Missing state parameter</p>", 400
         
+        # Check if we received an error instead of a code
+        if request.args.get('error'):
+            error = request.args.get('error')
+            app.logger.error(f"OAuth2 error: {error}")
+            return f"<h1>Authentication Failed</h1><p>Error: {error}</p>", 400
+        
+        # Get the authorization code
+        code = request.args.get('code')
+        if not code:
+            app.logger.error("OAuth2 callback missing code parameter")
+            return "<h1>Authentication Failed</h1><p>Missing code parameter</p>", 400
+        
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -644,6 +656,8 @@ def oauth2callback():
             state=user_id
         )
         flow.redirect_uri = os.environ["REDIRECT_URI"]
+        
+        # Exchange the authorization code for credentials
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
 
@@ -685,7 +699,6 @@ def oauth2callback():
     except Exception as e:
         app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
-
 
 @app.route("/complete_profile", methods=["GET", "POST"])
 def complete_profile():
