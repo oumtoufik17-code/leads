@@ -578,56 +578,24 @@ def fetch_mail():
     return fetch_via_gmail_api(user_id)
 
 #-----------------------------------------------------------------------
-@app.route("/connect_gmail")
-def connect_gmail():
-    """
-    Initiates Gmail OAuth flow.
-    """
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user ID", 400
-
-    # Create a session to store the user_id
-    session['oauth_user_id'] = user_id
-    
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": os.environ["GOOGLE_CLIENT_ID"],
-                "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [os.environ["REDIRECT_URI"]]
-            }
-        },
-        scopes=[
-            "https://www.googleapis.com/auth/gmail.send",
-            "https://www.googleapis.com/auth/gmail.readonly",
-            "https://www.googleapis.com/auth/userinfo.email",
-            "https://www.googleapis.com/auth/gmail.compose",
-            "openid"
-        ],
-        state=user_id  # Set state parameter
-    )
-    flow.redirect_uri = os.environ["REDIRECT_URI"]
-    authorization_url, _ = flow.authorization_url(
-        access_type="offline",
-        include_granted_scopes="true",
-        prompt="consent"
-    )
-    return redirect(authorization_url)
+1c70e96e-dbd0-4c6b-a172-b8ac8cdba08c
 
 
 @app.route("/oauth2callback")
 def oauth2callback():
     """Handles OAuth2 callback from Google"""
     try:
+        app.logger.info(f"OAuth2 callback received: {request.url}")
+        app.logger.info(f"Query params: {dict(request.args)}")
+        
         # Extract state parameter containing user_id
         user_id = request.args.get("state")
+        app.logger.info(f"State from URL: {user_id}")
         
-        # Fallback to session if state is not in URL
-        if not user_id and 'oauth_user_id' in session:
+        # Fallback to session if state is not in URL or is not a valid UUID
+        if (not user_id or not is_valid_uuid(user_id)) and 'oauth_user_id' in session:
             user_id = session['oauth_user_id']
+            app.logger.info(f"Using user_id from session: {user_id}")
             
         if not user_id:
             app.logger.error("OAuth2 callback missing state parameter")
@@ -645,13 +613,6 @@ def oauth2callback():
             app.logger.error("OAuth2 callback missing code parameter")
             return "<h1>Authentication Failed</h1><p>Missing code parameter</p>", 400
         
-        # Validate user_id is a valid UUID
-        try:
-            uuid.UUID(user_id)
-        except ValueError:
-            app.logger.error(f"Invalid UUID format: {user_id}")
-            return "<h1>Authentication Failed</h1><p>Invalid user ID format</p>", 400
-        
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -668,8 +629,7 @@ def oauth2callback():
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/gmail.compose",
                 "openid"
-            ],
-            state=user_id
+            ]
         )
         flow.redirect_uri = os.environ["REDIRECT_URI"]
         
@@ -738,6 +698,26 @@ def oauth2callback():
     except Exception as e:
         app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
+
+def is_valid_uuid(uuid_to_test, version=4):
+    """
+    Check if uuid_to_test is a valid UUID.
+    
+    Parameters
+    ----------
+    uuid_to_test : str
+    version : {1, 2, 3, 4}
+    
+    Returns
+    -------
+    `True` if uuid_to_test is a valid UUID, otherwise `False`.
+    """
+    try:
+        uuid_obj = uuid.UUID(uuid_to_test, version=version)
+    except ValueError:
+        return False
+    return str(uuid_obj) == uuid_to_test
+  
 @app.route("/complete_profile", methods=["GET", "POST"])
 def complete_profile():
     user_id = request.args.get("user_id")
