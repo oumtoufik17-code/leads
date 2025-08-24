@@ -30,6 +30,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Debug - Show environment info
+        run: |
+          echo "Python version: $(python --version)"
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
 
       - name: Run Gmail Poller
         id: poll-gmail
@@ -40,6 +46,7 @@ jobs:
           GOOGLE_CLIENT_SECRET:      ${{ secrets.GOOGLE_CLIENT_SECRET }}
           ENCRYPTION_KEY:            ${{ secrets.ENCRYPTION_KEY }}
         run: |
+          echo "Running Gmail poller..."
           python poll_gmail.py
           echo "status=gmail" >> $GITHUB_OUTPUT
 
@@ -50,6 +57,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           ENCRYPTION_KEY:            ${{ secrets.ENCRYPTION_KEY }}
         run: |
+          echo "Running IMAP/SMTP poller..."
           python poll_imap_smtp.py
           echo "status=imap" >> $GITHUB_OUTPUT
 
@@ -57,13 +65,28 @@ jobs:
     needs: poll-mail
     runs-on: ubuntu-latest
     steps:
+      - name: Debug - Check if token is set
+        run: |
+          if [ -z "${{ secrets.PROCESS_SECRET_TOKEN }}" ]; then
+            echo "ERROR: PROCESS_SECRET_TOKEN is not set!"
+            exit 1
+          else
+            echo "PROCESS_SECRET_TOKEN is set (length: ${#PROCESS_SECRET_TOKEN})"
+          fi
+
       - name: Trigger Main Processing Endpoint on Render
         run: |
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          echo "Calling: https://leads-ykkj.onrender.com/process?token=[REDACTED]"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             "https://leads-ykkj.onrender.com/process?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
-          echo "HTTP status: $HTTP"
-          if [[ "$HTTP" != "200" && "$HTTP" != "204" && "$HTTP" != "429" ]]; then
-            echo "::error::Processing failed with status: $HTTP"
+          echo "HTTP status: $HTTP_STATUS"
+          
+          # For debugging, let's also get the response body
+          RESPONSE=$(curl -s "https://leads-ykkj.onrender.com/process?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
+          echo "Response: $RESPONSE"
+          
+          if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "204" && "$HTTP_STATUS" != "429" ]]; then
+            echo "::error::Processing failed with status: $HTTP_STATUS"
             exit 1
           fi
 
@@ -73,7 +96,10 @@ jobs:
     steps:
       - name: Generate all ready closing kits
         run: |
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST "https://leads-ykkj.onrender.com/autopilot/trigger-all")
-          echo "Autopilot-all returned $HTTP"
-          test "$HTTP" = "200" || test "$HTTP" = "204"
+          echo "Autopilot-all returned $HTTP_STATUS"
+          if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "204" ]]; then
+            echo "::error::Autopilot failed with status: $HTTP_STATUS"
+            exit 1
+          fi
