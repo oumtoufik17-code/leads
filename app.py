@@ -583,6 +583,10 @@ def connect_gmail():
     """
     Initiates Gmail OAuth flow.
     """
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return "Missing user ID", 400
+
     flow = Flow.from_client_config(
         {
             "web": {
@@ -606,7 +610,7 @@ def connect_gmail():
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
-        state=user_id  # Add this line to set the state parameter
+        state=user_id  # Make sure this is set
     )
     return redirect(authorization_url)
 
