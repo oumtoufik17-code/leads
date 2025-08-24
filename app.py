@@ -941,8 +941,8 @@ def trigger_process():
         # ── 2) Generate Response ──
         if gen:
             ids = [r["id"] for r in gen]
-            # Call the correct endpoint without the action suffix
-            if call_edge("/functions/v1/clever-service", {"email_ids": ids, "action": "generate-response"}):
+            # Call the correct endpoint with /generate-response
+            if call_edge("/functions/v1/clever-service/generate-response", {"email_ids": ids}):
                 all_processed.extend(ids)
             else:
                 supabase.table("emails")\
@@ -952,8 +952,8 @@ def trigger_process():
         # ── 3) Personalize Template ──
         if per:
             for eid in [r["id"] for r in per]:
-                # Call the correct endpoint without the action suffix
-                if call_edge("/functions/v1/clever-service", {"email_ids":[eid], "action": "personalize-template"}):
+                # Call the correct endpoint with /personalize-template
+                if call_edge("/functions/v1/clever-service/personalize-template", {"email_ids":[eid]}):
                     supabase.table("emails").update({"status":"awaiting_proposal"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
@@ -964,8 +964,8 @@ def trigger_process():
         # ── 4) Generate Proposal → ready_to_send ──
         if prop:
             for eid in [r["id"] for r in prop]:
-                # Call the correct endpoint without the action suffix
-                if call_edge("/functions/v1/clever-service", {"email_ids":[eid], "action": "generate-proposal"}):
+                # Call the correct endpoint with /generate-proposal
+                if call_edge("/functions/v1/clever-service/generate-proposal", {"email_ids":[eid]}):
                     supabase.table("emails").update({"status":"ready_to_send"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
@@ -1046,59 +1046,59 @@ def trigger_process():
 
             # 2) Gmail API fallback
             try:
-    # Get the most recent token for this user
-    tok_resp = supabase.table("gmail_tokens") \
-                      .select("credentials, created_at") \
-                      .eq("user_id", uid) \
-                      .order("created_at", desc=True) \
-                      .limit(1) \
-                      .execute()
-    
-    if not tok_resp.data or len(tok_resp.data) == 0:
-        raise ValueError("No Gmail token found")
+                # Get the most recent token for this user
+                tok_resp = supabase.table("gmail_tokens") \
+                                  .select("credentials, created_at") \
+                                  .eq("user_id", uid) \
+                                  .order("created_at", desc=True) \
+                                  .limit(1) \
+                                  .execute()
+                
+                if not tok_resp.data or len(tok_resp.data) == 0:
+                    raise ValueError("No Gmail token found")
 
-    cd = tok_resp.data[0]["credentials"]
-    creds = Credentials(
-        token=cd["token"],
-        refresh_token=cd["refresh_token"],
-        token_uri=cd["token_uri"],
-        client_id=cd["client_id"],
-        client_secret=cd["client_secret"],
-        scopes=cd["scopes"],
-    )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
+                cd = tok_resp.data[0]["credentials"]
+                creds = Credentials(
+                    token=cd["token"],
+                    refresh_token=cd["refresh_token"],
+                    token_uri=cd["token_uri"],
+                    client_id=cd["client_id"],
+                    client_secret=cd["client_secret"],
+                    scopes=cd["scopes"],
+                )
+                if creds.expired and creds.refresh_token:
+                    creds.refresh(GoogleRequest())
 
-    svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
-    msg = MIMEText(full_html, "html")
-    msg["to"]      = to_addr
-    msg["from"]    = "me"
-    msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}"  # Modified subject
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+                svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
+                msg = MIMEText(full_html, "html")
+                msg["to"]      = to_addr
+                msg["from"]    = "me"
+                msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}"  # Modified subject
+                raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
-    if lease_flag:
-        svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
-        status_to = "drafted"
-        drafted.append(em_id)
-    else:
-        svc.users().messages().send(userId="me", body={"raw": raw}).execute()
-        status_to = "sent"
-        sent.append(em_id)
+                if lease_flag:
+                    svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
+                    status_to = "drafted"
+                    drafted.append(em_id)
+                else:
+                    svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+                    status_to = "sent"
+                    sent.append(em_id)
 
-    supabase.table("emails").update({
-        "status":  status_to,
-        "sent_at": datetime.utcnow().isoformat()
-    }).eq("id", em_id).execute()
-    emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
-    app.logger.info(f"Gmail API send succeeded for email {em_id} (user {uid})")
+                supabase.table("emails").update({
+                    "status":  status_to,
+                    "sent_at": datetime.utcnow().isoformat()
+                }).eq("id", em_id).execute()
+                emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
+                app.logger.info(f"Gmail API send succeeded for email {em_id} (user {uid})")
 
-except Exception as e:
-    app.logger.error(f"Gmail API send failed for email {em_id} (user {uid})", exc_info=True)
-    supabase.table("emails").update({
-        "status":        "error",
-        "error_message": str(e)
-    }).eq("id", em_id).execute()
-    failed.append(em_id)
+            except Exception as e:
+                app.logger.error(f"Gmail API send failed for email {em_id} (user {uid})", exc_info=True)
+                supabase.table("emails").update({
+                    "status":        "error",
+                    "error_message": str(e)
+                }).eq("id", em_id).execute()
+                failed.append(em_id)
 
         # ── Summary response ──
         summary = {
