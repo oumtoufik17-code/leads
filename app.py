@@ -581,13 +581,8 @@ def fetch_mail():
 @app.route("/connect_gmail")
 def connect_gmail():
     """
-    Initiates Gmail OAuth flow. Must be called with ?user_id=<auth_user_id>.
-    This ensures the state returned by Google is the user's UUID.
+    Initiates Gmail OAuth flow.
     """
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user_id. Call /connect_gmail?user_id=<your-supabase-user-id>", 400
-
     flow = Flow.from_client_config(
         {
             "web": {
@@ -607,52 +602,23 @@ def connect_gmail():
         ]
     )
     flow.redirect_uri = os.environ["REDIRECT_URI"]
-
-    # Put the exact auth user id into 'state' (Google will echo it back)
-    authorization_url, state = flow.authorization_url(
+    authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent",
-        state=user_id
+        prompt="consent"
     )
-
-    # Optional: persist fallback in server-side session (if you enabled sessions)
-    try:
-        session["oauth_user_id"] = user_id
-        session["oauth_state"] = state
-    except Exception:
-        # session might not be configured—it's optional, we still continue
-        pass
-
     return redirect(authorization_url)
 
-
-# --- replace oauth2callback ---
 @app.route("/oauth2callback")
 def oauth2callback():
-    """Handles OAuth2 callback from Google with robust state handling."""
+    """Handles OAuth2 callback from Google"""
     try:
-        # 1) Try to read state from Google
-        state = request.args.get("state")
-
-        # 2) If state missing or not a UUID, attempt to fall back to session
-        if not state:
-            try:
-                state = session.pop("oauth_user_id", None) or session.pop("oauth_state", None)
-            except Exception:
-                state = None
-
-        # 3) We'll accept state only if it's a valid UUID string (your profiles.id is UUID)
-        user_id = None
-        if state:
-            try:
-                # validate UUID format
-                uuid_obj = uuid.UUID(state)
-                user_id = str(uuid_obj)
-            except Exception:
-                user_id = None  # not a UUID, will try email-based lookup below
-
-        # Build flow for token exchange (state param optional here)
+        # Extract state parameter containing user_id
+        user_id = request.args.get("state")
+        if not user_id:
+            app.logger.error("OAuth2 callback missing state parameter")
+            return "<h1>Authentication Failed</h1><p>Missing state parameter</p>", 400
+        
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -670,45 +636,26 @@ def oauth2callback():
                 "https://www.googleapis.com/auth/gmail.compose",
                 "openid"
             ],
-            state=state if state else None
+            state=user_id
         )
         flow.redirect_uri = os.environ["REDIRECT_URI"]
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
 
-        # Verify ID token and get the Gmail email address
+        # Verify ID token
         id_info = id_token.verify_oauth2_token(
             credentials.id_token,
             grequests.Request(),
             os.environ["GOOGLE_CLIENT_ID"]
         )
-        gmail_email = id_info.get("email")
-        if not gmail_email:
+        email = id_info.get("email")
+        if not email:
             raise ValueError("No email found in Google ID token")
 
-        # If we don't yet have a UUID user_id from state, try to find the profile by email
-        if not user_id:
-            # Use service role client to avoid RLS problems
-            try:
-                lookup = SUPABASE_SERVICE.table("profiles").select("id").eq("email", gmail_email).single().execute()
-                if lookup and lookup.data and lookup.data.get("id"):
-                    user_id = lookup.data["id"]
-            except Exception:
-                user_id = None
-
-        # If we still don't have a user_id, return a helpful error so the user re-connects properly
-        if not user_id:
-            msg = (
-                "Could not determine your user_id. Please initiate the Gmail connect flow "
-                "from your dashboard while signed in so the server can attach the account."
-            )
-            app.logger.error("OAuth2 callback: no user_id (state wasn't a UUID and no profile matched email)")
-            return f"<h1>Authentication Failed</h1><p>{msg}</p>", 400
-
-        # Upsert gmail tokens (we have user_id and gmail_email)
+        # Upsert gmail tokens
         creds_payload = {
             "user_id": user_id,
-            "user_email": gmail_email,
+            "user_email": email,
             "credentials": {
                 "token": credentials.token,
                 "refresh_token": credentials.refresh_token,
@@ -718,12 +665,12 @@ def oauth2callback():
                 "scopes": credentials.scopes
             }
         }
-        SUPABASE_SERVICE.table("gmail_tokens").upsert(creds_payload).execute()
+        supabase.table("gmail_tokens").upsert(creds_payload).execute()
 
-        # Update user profile (use service role)
-        full_name = id_info.get("name") or gmail_email.split("@")[0]
-        SUPABASE_SERVICE.table("profiles").update({
-            "email": gmail_email,
+        # Update user profile
+        full_name = id_info.get("name") or email.split("@")[0]
+        supabase.table("profiles").update({
+            "email": email,
             "full_name": full_name,
             "ai_enabled": True
         }).eq("id", user_id).execute()
@@ -731,7 +678,7 @@ def oauth2callback():
         return redirect(f"/dashboard?user_id={user_id}")
 
     except Exception as e:
-        app.logger.exception("OAuth2 Callback Error")
+        app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
 
 
