@@ -128,8 +128,8 @@ def dashboard():
     revenue_change  = 0
 
     # Ensure these always exist for the template
-    kits_generated = 0
-    estimated_saved = 0
+    #kits_generated = 0
+    #estimated_saved = 0
 
     if user_id:
         # 1) Load profile
@@ -190,20 +190,20 @@ def dashboard():
             app.logger.warning(f"dashboard: failed to check Gmail token for {user_id}")
 
         # 4) Count "kits generated" for this user
-        kit_rows = (
-            supabase.table("transactions")
-                     .select("id")
-                     .eq("user_id", user_id)
-                     .eq("kit_generated", True)
-                     .execute()
-                     .data
-            or []
-        )
-        kits_generated = len(kit_rows)
+       # kit_rows = (
+        #    supabase.table("transactions")
+         #            .select("id")
+          #           .eq("user_id", user_id)
+           #          .eq("kit_generated", True)
+            #         .execute()
+             #        .data
+            #or []
+        #)
+        #kits_generated = len(kit_rows)
 
-        # 5) Compute extra estimated time saved (e.g. 15 min per kit)
-        PER_KIT_SAVE_MINUTES = 15
-        estimated_saved = kits_generated * PER_KIT_SAVE_MINUTES
+        ## 5) Compute extra estimated time saved (e.g. 15 min per kit)
+      #  PER_KIT_SAVE_MINUTES = 15
+       # estimated_saved = kits_generated * PER_KIT_SAVE_MINUTES
 
     # ── Render dashboard ──
     return render_template(
@@ -221,10 +221,7 @@ def dashboard():
         revenue_change=revenue_change
     )
 
-@app.route("/dashboard/new_transaction")
-def dashboard_new_transaction():
-    user_id = request.args.get("user_id") or abort(401)
-    return render_template("partials/new_transaction.html", user_id=user_id)
+
   
 @app.route("/dashboard/responded_emails")
 def dashboard_responded_emails():
@@ -635,11 +632,12 @@ def oauth2callback():
         
         # Exchange the authorization code for credentials
         try:
-            flow.fetch_token(authorization_response=request.url)
+            # Use the code directly instead of the full URL
+            flow.fetch_token(code=code)
         except Exception as e:
             app.logger.error(f"Token exchange failed: {str(e)}")
-            # Try to restart the OAuth flow
-            return redirect(f"/reconnect_gmail?user_id={user_id}")
+            # Instead of redirecting (which might cause infinite loops), show an error
+            return f"<h1>Authentication Failed</h1><p>Token exchange failed: {str(e)}</p><p>Please try again by reconnecting your Gmail account.</p>", 400
         
         credentials = flow.credentials
 
@@ -691,13 +689,15 @@ def oauth2callback():
             # Continue anyway since the token was saved
 
         # Clear the session
-        session.pop('oauth_user_id', None)
+        if 'oauth_user_id' in session:
+            session.pop('oauth_user_id')
         
         return redirect(f"/dashboard?user_id={user_id}")
 
     except Exception as e:
         app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
+
 
 def is_valid_uuid(uuid_to_test, version=4):
     """
