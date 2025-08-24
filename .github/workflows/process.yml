@@ -60,7 +60,7 @@ jobs:
       - name: Trigger Main Processing Endpoint on Render
         run: |
           HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://replyzeai.onrender.com/process?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
+            "https://leads-ykkj.onrender.com/process?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
           echo "HTTP status: $HTTP"
           if [[ "$HTTP" != "200" && "$HTTP" != "204" && "$HTTP" != "429" ]]; then
             echo "::error::Processing failed with status: $HTTP"
@@ -74,6 +74,6 @@ jobs:
       - name: Generate all ready closing kits
         run: |
           HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "https://replyzeai.onrender.com/autopilot/trigger-all")
+            -X POST "https://leads-ykkj.onrender.com/autopilot/trigger-all")
           echo "Autopilot-all returned $HTTP"
           test "$HTTP" = "200" || test "$HTTP" = "204"
