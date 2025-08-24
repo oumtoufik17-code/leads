@@ -605,7 +605,8 @@ def connect_gmail():
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent"
+        prompt="consent",
+        state=user_id  # Add this line to set the state parameter
     )
     return redirect(authorization_url)
 
