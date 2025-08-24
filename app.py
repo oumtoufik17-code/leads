@@ -872,27 +872,44 @@ def trigger_process():
     try:
         # ── 0) DAILY RESET CHECK ──
         today_str = date.today().isoformat()
-        rl_row = SUPABASE_SERVICE.table("rate_limit_reset") \
-            .select("last_reset") \
-            .eq("id", "global") \
-            .single() \
-            .execute().data or {}
-        last_date = rl_row.get("last_reset", "")[:10]  # e.g. "2025-07-27"
+        
+        # Check if rate_limit_reset table exists and get last reset date
+        last_date = ""
+        try:
+            rl_row = SUPABASE_SERVICE.table("rate_limit_reset") \
+                .select("last_reset") \
+                .eq("id", "global") \
+                .single() \
+                .execute().data or {}
+            last_date = rl_row.get("last_reset", "")[:10] if rl_row else ""
+        except Exception as e:
+            app.logger.warning(f"rate_limit_reset table not found or error accessing it: {str(e)}")
+            # Continue without daily reset functionality
+            last_date = today_str  # Set to today to skip reset
 
         if last_date != today_str:
             app.logger.info("🔄 New day detected – clearing emails table")
 
-            # Delete all rows by filtering out a UUID value that never exists
-            SUPABASE_SERVICE.table("emails") \
-                .delete() \
-                .neq("id", "00000000-0000-0000-0000-000000000000") \
-                .execute()
+            try:
+                # Delete all rows by filtering out a UUID value that never exists
+                SUPABASE_SERVICE.table("emails") \
+                    .delete() \
+                    .neq("id", "00000000-0000-0000-0000-000000000000") \
+                    .execute()
 
-            # Update the reset timestamp
-            SUPABASE_SERVICE.table("rate_limit_reset") \
-                .update({"last_reset": datetime.now(timezone.utc).isoformat()}) \
-                .eq("id", "global") \
-                .execute()
+                # Try to update the reset timestamp if table exists
+                try:
+                    SUPABASE_SERVICE.table("rate_limit_reset") \
+                        .upsert({
+                            "id": "global",
+                            "last_reset": datetime.now(timezone.utc).isoformat()
+                        }) \
+                        .execute()
+                except Exception:
+                    app.logger.warning("rate_limit_reset table doesn't exist, skipping update")
+            except Exception as e:
+                app.logger.error(f"Error during daily reset: {str(e)}")
+                # Continue processing even if reset fails
 
         # ── 0) Build per-user counts of emails already sent today (YYYY‑MM‑DD) ──
         today_iso = datetime.utcnow().date().isoformat()
@@ -924,7 +941,8 @@ def trigger_process():
         # ── 2) Generate Response ──
         if gen:
             ids = [r["id"] for r in gen]
-            if call_edge("/functions/v1/clever-service/generate-response", {"email_ids": ids}):
+            # Call the correct endpoint without the action suffix
+            if call_edge("/functions/v1/clever-service", {"email_ids": ids, "action": "generate-response"}):
                 all_processed.extend(ids)
             else:
                 supabase.table("emails")\
@@ -934,7 +952,8 @@ def trigger_process():
         # ── 3) Personalize Template ──
         if per:
             for eid in [r["id"] for r in per]:
-                if call_edge("/functions/v1/clever-service/personalize-template", {"email_ids":[eid]}):
+                # Call the correct endpoint without the action suffix
+                if call_edge("/functions/v1/clever-service", {"email_ids":[eid], "action": "personalize-template"}):
                     supabase.table("emails").update({"status":"awaiting_proposal"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
@@ -945,7 +964,8 @@ def trigger_process():
         # ── 4) Generate Proposal → ready_to_send ──
         if prop:
             for eid in [r["id"] for r in prop]:
-                if call_edge("/functions/v1/clever-service/generate-proposal", {"email_ids":[eid]}):
+                # Call the correct endpoint without the action suffix
+                if call_edge("/functions/v1/clever-service", {"email_ids":[eid], "action": "generate-proposal"}):
                     supabase.table("emails").update({"status":"ready_to_send"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
@@ -1020,7 +1040,7 @@ def trigger_process():
                     supabase.table("emails").update({
                         "status":        "error",
                         "error_message": str(e)
-                    }).eq("id", em_id).execute()
+                    ).eq("id", em_id).execute()
                     failed.append(em_id)
                 continue  # next `rec`
 
@@ -1048,7 +1068,7 @@ def trigger_process():
                 msg = MIMEText(full_html, "html")
                 msg["to"]      = to_addr
                 msg["from"]    = "me"
-                msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get("subject", "Your Email")}"  # Modified subject
+                msg["subject"] = "Lease Agreement Draft" if lease_flag else f"RE: {rec.get('subject', 'Your Email')}"  # Modified subject
                 raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
                 if lease_flag:
@@ -1056,7 +1076,7 @@ def trigger_process():
                     status_to = "drafted"
                     drafted.append(em_id)
                 else:
-                    svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+                    svc.users().messages().send(userId="me", body={"raw": raw}}).execute()
                     status_to = "sent"
                     sent.append(em_id)
 
