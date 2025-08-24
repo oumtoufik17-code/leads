@@ -580,13 +580,8 @@ def fetch_mail():
 @app.route("/connect_gmail")
 def connect_gmail():
     """
-    Initiates Gmail OAuth flow. Requires ?user_id=<auth_user_id> on the request.
-    Stores user_id in session as a fallback in case 'state' is lost.
+    Initiates Gmail OAuth flow.
     """
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user_id", 400
-
     flow = Flow.from_client_config(
         {
             "web": {
@@ -606,40 +601,23 @@ def connect_gmail():
         ]
     )
     flow.redirect_uri = os.environ["REDIRECT_URI"]
-
-    # Use state=user_id so we can get it back in the callback (and also persist in session).
-    authorization_url, state = flow.authorization_url(
+    authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent",
-        state=user_id
+        prompt="consent"
     )
-
-    # Persist fallback in server-side session in case `state` is stripped
-    session["oauth_user_id"] = user_id
-    session["oauth_state"] = state
-
     return redirect(authorization_url)
-
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    """Handles OAuth2 callback from Google. Accepts state in query or falls back to session."""
+    """Handles OAuth2 callback from Google"""
     try:
-        # 1) Try to get state from Google's redirect
-        state = request.args.get("state")
-
-        # 2) Fallback: if state missing, try the saved session value
-        if not state:
-            state = session.pop("oauth_user_id", None) or session.pop("oauth_state", None)
-
-        if not state:
+        # Extract state parameter containing user_id
+        user_id = request.args.get("state")
+        if not user_id:
             app.logger.error("OAuth2 callback missing state parameter")
             return "<h1>Authentication Failed</h1><p>Missing state parameter</p>", 400
-
-        user_id = state  # we encoded the auth user id into the state
-
-        # Build flow (pass state to be strict)
+        
         flow = Flow.from_client_config(
             {
                 "web": {
@@ -657,15 +635,13 @@ def oauth2callback():
                 "https://www.googleapis.com/auth/gmail.compose",
                 "openid"
             ],
-            state=state
+            state=user_id
         )
         flow.redirect_uri = os.environ["REDIRECT_URI"]
-
-        # Exchange the auth code for tokens using the full request URL
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
 
-        # Verify ID token (optional but good)
+        # Verify ID token
         id_info = id_token.verify_oauth2_token(
             credentials.id_token,
             grequests.Request(),
@@ -703,7 +679,6 @@ def oauth2callback():
     except Exception as e:
         app.logger.error(f"OAuth2 Callback Error: {str(e)}", exc_info=True)
         return f"<h1>Authentication Failed</h1><p>{str(e)}</p>", 500
-
 @app.route("/complete_profile", methods=["GET", "POST"])
 def complete_profile():
     user_id = request.args.get("user_id")
