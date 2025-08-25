@@ -51,6 +51,10 @@ fernet = Fernet(ENCRYPTION_KEY)
 MAX_RETRIES = 5
 RETRY_BACKOFF_BASE = 2
 
+# Add these constants near the top of your app.py
+YES_KEYWORDS = ["yes", "confirm", "agreed", "approved", "accept"]
+UNSUBSCRIBE_KEYWORDS = ["unsubscribe", "stop", "cancel", "remove", "opt out"]
+
 #----------------------------------------------------------------------------
 def get_smtp_creds(user_id: str):
     """Return decrypted (email, app_password) or (None, None)."""
@@ -928,26 +932,41 @@ def trigger_process():
                 emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
 
         # ── 1) Fetch the three pre‑send queues ──
-        gen  = supabase.table("emails").select("id").eq("status", "processing").execute().data or []
-        per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
-        prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
+    gen  = supabase.table("emails").select("id, user_id, sender_email, original_content").eq("status", "processing").execute().data or []
+    per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
+    prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
 
-        if not (gen or per or prop):
-            app.logger.info("⚡ No emails to process — returning 204")
-            return "", 204
+    if not (gen or per or prop):
+        app.logger.info("⚡ No emails to process — returning 204")
+        return "", 204
 
-        all_processed, sent, drafted, failed = [], [], [], []
+    all_processed, sent, drafted, failed = [], [], [], []
 
-        # ── 2) Generate Response ──
-        if gen:
-            ids = [r["id"] for r in gen]
-            # Call the correct endpoint with /generate-response
-            if call_edge("/generate-response", {"email_ids": ids}):
-                all_processed.extend(ids)
-            else:
-                supabase.table("emails")\
-                        .update({"status":"error","error_message":"generate-response failed"})\
-                        .in_("id", ids).execute()
+    # ── NEW: Check for YES/UNSUBSCRIBE keywords before generating responses ──
+    gen_after_keyword_check = []
+    for email in gen:
+        # Check for keywords and send auto-response if found
+        auto_responded = check_keywords_and_auto_respond(
+            email["id"], 
+            email["original_content"], 
+            email["user_id"], 
+            email["sender_email"]
+        )
+        
+        if not auto_responded:
+            gen_after_keyword_check.append(email["id"])
+        else:
+            all_processed.append(email["id"])
+            sent.append(email["id"])  # Count auto-responses as sent
+
+    # ── 2) Generate Response (only for emails that didn't get auto-responses) ──
+    if gen_after_keyword_check:
+        if call_edge("/generate-response", {"email_ids": gen_after_keyword_check}):
+            all_processed.extend(gen_after_keyword_check)
+        else:
+            supabase.table("emails")\
+                    .update({"status":"error","error_message":"generate-response failed"})\
+                    .in_("id", gen_after_keyword_check).execute()
 
         # ── 3) Personalize Template ──
         if per:
@@ -1113,6 +1132,134 @@ def trigger_process():
     except Exception as e:
         app.logger.error(f"Error in process endpoint: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+# Add this function to handle keyword detection and auto-responses
+def check_keywords_and_auto_respond(email_id, original_content, user_id, sender_email):
+    """
+    Check email content for YES/UNSUBSCRIBE keywords and send automated responses
+    Returns True if auto-response was sent, False otherwise
+    """
+    content_lower = original_content.lower()
+    
+    # Check for YES keywords
+    if any(keyword in content_lower for keyword in YES_KEYWORDS):
+        # Send confirmation template
+        send_auto_response(
+            user_id, 
+            sender_email, 
+            "Confirmation Received", 
+            YES_TEMPLATE
+        )
+        # Update email status
+        supabase.table("emails").update({
+            "status": "auto_replied",
+            "processed_content": YES_TEMPLATE,
+            "sent_at": datetime.utcnow().isoformat()
+        }).eq("id", email_id).execute()
+        return True
+    
+    # Check for UNSUBSCRIBE keywords
+    if any(keyword in content_lower for keyword in UNSUBSCRIBE_KEYWORDS):
+        # Send unsubscribe template
+        send_auto_response(
+            user_id, 
+            sender_email, 
+            "Unsubscription Confirmation", 
+            UNSUBSCRIBE_TEMPLATE
+        )
+        # Update email status
+        supabase.table("emails").update({
+            "status": "auto_replied",
+            "processed_content": UNSUBSCRIBE_TEMPLATE,
+            "sent_at": datetime.utcnow().isoformat()
+        }).eq("id", email_id).execute()
+        return True
+    
+    return False
+
+# Add these template strings (customize as needed)
+YES_TEMPLATE = """Thank you for your confirmation! We're excited to work with you.
+
+We'll be in touch shortly with more details.
+
+Best regards,
+The Team"""
+
+UNSUBSCRIBE_TEMPLATE = """We're sorry to see you go. You have been successfully unsubscribed from our mailing list.
+
+If this was a mistake or you'd like to resubscribe in the future, please don't hesitate to contact us.
+
+Thank you,
+The Team"""
+
+
+# Add this function to send auto-responses
+def send_auto_response(user_id, to_email, subject, body):
+    """
+    Send an automated response using the user's preferred method (SMTP or Gmail API)
+    """
+    # Try SMTP first
+    prof = supabase.table("profiles") \
+                   .select("smtp_email,smtp_enc_password,smtp_host") \
+                   .eq("id", user_id).single().execute().data or {}
+    
+    if prof.get("smtp_email") and prof.get("smtp_enc_password"):
+        smtp_email = prof["smtp_email"]
+        smtp_pass = fernet.decrypt(prof["smtp_enc_password"].encode()).decode()
+        smtp_host = prof.get("smtp_host", "smtp.gmail.com")
+        
+        try:
+            send_email_smtp(
+                smtp_email,
+                smtp_pass,
+                to_email,
+                subject,
+                body,
+                smtp_host=smtp_host
+            )
+            return True
+        except Exception as e:
+            app.logger.error(f"SMTP auto-response failed: {str(e)}")
+    
+    # Fall back to Gmail API
+    try:
+        tok_resp = supabase.table("gmail_tokens") \
+                          .select("credentials, created_at") \
+                          .eq("user_id", user_id) \
+                          .order("created_at", desc=True) \
+                          .limit(1) \
+                          .execute()
+        
+        if not tok_resp.data or len(tok_resp.data) == 0:
+            return False
+
+        cd = tok_resp.data[0]["credentials"]
+        creds = Credentials(
+            token=cd["token"],
+            refresh_token=cd["refresh_token"],
+            token_uri=cd["token_uri"],
+            client_id=cd["client_id"],
+            client_secret=cd["client_secret"],
+            scopes=cd["scopes"],
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+
+        svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        msg = MIMEText(body, "plain")
+        msg["to"] = to_email
+        msg["from"] = "me"
+        msg["subject"] = subject
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        
+        svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+        return True
+    except Exception as e:
+        app.logger.error(f"Gmail API auto-response failed: {str(e)}")
+        return False
+
+
+
+
 
 # ── Final entry point ──
 if __name__ == "__main__":
