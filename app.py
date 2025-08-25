@@ -932,41 +932,41 @@ def trigger_process():
                 emails_sent_today[uid] = emails_sent_today.get(uid, 0) + 1
 
         # ── 1) Fetch the three pre‑send queues ──
-    gen  = supabase.table("emails").select("id, user_id, sender_email, original_content").eq("status", "processing").execute().data or []
-    per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
-    prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
+        gen  = supabase.table("emails").select("id, user_id, sender_email, original_content").eq("status", "processing").execute().data or []
+        per  = supabase.table("emails").select("id").eq("status", "ready_to_personalize").execute().data or []
+        prop = supabase.table("emails").select("id").eq("status", "awaiting_proposal").execute().data or []
 
-    if not (gen or per or prop):
-        app.logger.info("⚡ No emails to process — returning 204")
-        return "", 204
+        if not (gen or per or prop):
+            app.logger.info("⚡ No emails to process — returning 204")
+            return "", 204
 
-    all_processed, sent, drafted, failed = [], [], [], []
+        all_processed, sent, drafted, failed = [], [], [], []
 
-    # ── NEW: Check for YES/UNSUBSCRIBE keywords before generating responses ──
-    gen_after_keyword_check = []
-    for email in gen:
-        # Check for keywords and send auto-response if found
-        auto_responded = check_keywords_and_auto_respond(
-            email["id"], 
-            email["original_content"], 
-            email["user_id"], 
-            email["sender_email"]
-        )
-        
-        if not auto_responded:
-            gen_after_keyword_check.append(email["id"])
-        else:
-            all_processed.append(email["id"])
-            sent.append(email["id"])  # Count auto-responses as sent
+        # ── NEW: Check for YES/UNSUBSCRIBE keywords before generating responses ──
+        gen_after_keyword_check = []
+        for email in gen:
+            # Check for keywords and send auto-response if found
+            auto_responded = check_keywords_and_auto_respond(
+                email["id"], 
+                email["original_content"], 
+                email["user_id"], 
+                email["sender_email"]
+            )
+            
+            if not auto_responded:
+                gen_after_keyword_check.append(email["id"])
+            else:
+                all_processed.append(email["id"])
+                sent.append(email["id"])  # Count auto-responses as sent
 
-    # ── 2) Generate Response (only for emails that didn't get auto-responses) ──
-    if gen_after_keyword_check:
-        if call_edge("/generate-response", {"email_ids": gen_after_keyword_check}):
-            all_processed.extend(gen_after_keyword_check)
-        else:
-            supabase.table("emails")\
-                    .update({"status":"error","error_message":"generate-response failed"})\
-                    .in_("id", gen_after_keyword_check).execute()
+        # ── 2) Generate Response (only for emails that didn't get auto-responses) ──
+        if gen_after_keyword_check:
+            if call_edge("/generate-response", {"email_ids": gen_after_keyword_check}):
+                all_processed.extend(gen_after_keyword_check)
+            else:
+                supabase.table("emails")\
+                        .update({"status":"error","error_message":"generate-response failed"})\
+                        .in_("id", gen_after_keyword_check).execute()
 
         # ── 3) Personalize Template ──
         if per:
