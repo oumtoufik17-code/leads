@@ -1133,48 +1133,7 @@ def trigger_process():
         app.logger.error(f"Error in process endpoint: {str(e)}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 # Add this function to handle keyword detection and auto-responses
-def check_keywords_and_auto_respond(email_id, original_content, user_id, sender_email):
-    """
-    Check email content for YES/UNSUBSCRIBE keywords and send automated responses
-    Returns True if auto-response was sent, False otherwise
-    """
-    content_lower = original_content.lower()
-    
-    # Check for YES keywords
-    if any(keyword in content_lower for keyword in YES_KEYWORDS):
-        # Send confirmation template
-        send_auto_response(
-            user_id, 
-            sender_email, 
-            "Confirmation Received", 
-            YES_TEMPLATE
-        )
-        # Update email status
-        supabase.table("emails").update({
-            "status": "auto_replied",
-            "processed_content": YES_TEMPLATE,
-            "sent_at": datetime.utcnow().isoformat()
-        }).eq("id", email_id).execute()
-        return True
-    
-    # Check for UNSUBSCRIBE keywords
-    if any(keyword in content_lower for keyword in UNSUBSCRIBE_KEYWORDS):
-        # Send unsubscribe template
-        send_auto_response(
-            user_id, 
-            sender_email, 
-            "Unsubscription Confirmation", 
-            UNSUBSCRIBE_TEMPLATE
-        )
-        # Update email status
-        supabase.table("emails").update({
-            "status": "auto_replied",
-            "processed_content": UNSUBSCRIBE_TEMPLATE,
-            "sent_at": datetime.utcnow().isoformat()
-        }).eq("id", email_id).execute()
-        return True
-    
-    return False
+
 
 # Add these template strings (customize as needed)
 YES_TEMPLATE = """Thank you for your confirmation! We're excited to work with you.
@@ -1192,35 +1151,14 @@ Thank you,
 The Team"""
 
 
-# Add this function to send auto-responses
-def send_auto_response(user_id, to_email, subject, body):
+# Add this import at the top of your file
+from supabase.lib.storage import StorageException
+
+# Update the send_auto_response function to include both text and attachment
+def send_auto_response(user_id, to_email, subject, body, attach_pdf=False):
     """
-    Send an automated response using the user's preferred method (SMTP or Gmail API)
+    Send an automated response using Gmail API with both text body and optional PDF attachment
     """
-    # Try SMTP first
-    prof = supabase.table("profiles") \
-                   .select("smtp_email,smtp_enc_password,smtp_host") \
-                   .eq("id", user_id).single().execute().data or {}
-    
-    if prof.get("smtp_email") and prof.get("smtp_enc_password"):
-        smtp_email = prof["smtp_email"]
-        smtp_pass = fernet.decrypt(prof["smtp_enc_password"].encode()).decode()
-        smtp_host = prof.get("smtp_host", "smtp.gmail.com")
-        
-        try:
-            send_email_smtp(
-                smtp_email,
-                smtp_pass,
-                to_email,
-                subject,
-                body,
-                smtp_host=smtp_host
-            )
-            return True
-        except Exception as e:
-            app.logger.error(f"SMTP auto-response failed: {str(e)}")
-    
-    # Fall back to Gmail API
     try:
         tok_resp = supabase.table("gmail_tokens") \
                           .select("credentials, created_at") \
@@ -1245,11 +1183,34 @@ def send_auto_response(user_id, to_email, subject, body):
             creds.refresh(GoogleRequest())
 
         svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        msg = MIMEText(body, "plain")
-        msg["to"] = to_email
-        msg["from"] = "me"
-        msg["subject"] = subject
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        
+        # Create a multipart message
+        message = MIMEMultipart()
+        message['to'] = to_email
+        message['from'] = "me"
+        message['subject'] = subject
+
+        # Add the text body
+        text_part = MIMEText(body, 'plain')
+        message.attach(text_part)
+
+        # Add PDF from Supabase bucket if requested
+        if attach_pdf:
+            try:
+                # Download PDF from Supabase bucket
+                # Replace 'your-bucket-name' and 'your-file-name.pdf' with your actual values
+                pdf_data = supabase.storage.from_('your-bucket-name').download('your-file-name.pdf')
+                
+                pdf_part = MIMEBase('application', 'octet-stream')
+                pdf_part.set_payload(pdf_data)
+                encoders.encode_base64(pdf_part)
+                pdf_part.add_header('Content-Disposition', 'attachment', filename='Confirmation.pdf')
+                message.attach(pdf_part)
+            except StorageException as e:
+                app.logger.error(f"Failed to fetch PDF from Supabase: {str(e)}")
+                # Continue without attachment if PDF fetch fails
+
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         
         svc.users().messages().send(userId="me", body={"raw": raw}).execute()
         return True
@@ -1257,6 +1218,55 @@ def send_auto_response(user_id, to_email, subject, body):
         app.logger.error(f"Gmail API auto-response failed: {str(e)}")
         return False
 
+# Update the check_keywords_and_auto_respond function
+def check_keywords_and_auto_respond(email_id, original_content, user_id, sender_email):
+    """
+    Check email content for YES/UNSUBSCRIBE keywords and send automated responses
+    Returns True if auto-response was sent, False otherwise
+    """
+    content_lower = original_content.lower()
+    
+    # Check for YES keywords
+    if any(keyword in content_lower for keyword in YES_KEYWORDS):
+        # Send confirmation template with PDF attachment
+        success = send_auto_response(
+            user_id, 
+            sender_email, 
+            "Confirmation Received", 
+            YES_TEMPLATE,
+            attach_pdf=True  # This will trigger PDF attachment
+        )
+        
+        if success:
+            # Update email status
+            supabase.table("emails").update({
+                "status": "auto_replied",
+                "processed_content": YES_TEMPLATE,
+                "sent_at": datetime.utcnow().isoformat()
+            }).eq("id", email_id).execute()
+            return True
+    
+    # Check for UNSUBSCRIBE keywords (no attachment)
+    if any(keyword in content_lower for keyword in UNSUBSCRIBE_KEYWORDS):
+        # Send unsubscribe template
+        success = send_auto_response(
+            user_id, 
+            sender_email, 
+            "Unsubscription Confirmation", 
+            UNSUBSCRIBE_TEMPLATE,
+            attach_pdf=False  # No PDF for unsubscribe
+        )
+        
+        if success:
+            # Update email status
+            supabase.table("emails").update({
+                "status": "auto_replied",
+                "processed_content": UNSUBSCRIBE_TEMPLATE,
+                "sent_at": datetime.utcnow().isoformat()
+            }).eq("id", email_id).execute()
+            return True
+    
+    return False
 
 
 
