@@ -942,7 +942,7 @@ def trigger_process():
         if gen:
             ids = [r["id"] for r in gen]
             # Call the correct endpoint with /generate-response
-            if call_edge("/functions/v1/clever-service/generate-response", {"email_ids": ids}):
+            if call_edge("/generate-response", {"email_ids": ids}):
                 all_processed.extend(ids)
             else:
                 supabase.table("emails")\
@@ -953,7 +953,7 @@ def trigger_process():
         if per:
             for eid in [r["id"] for r in per]:
                 # Call the correct endpoint with /personalize-template
-                if call_edge("/functions/v1/clever-service/personalize-template", {"email_ids":[eid]}):
+                if call_edge("/personalize-template", {"email_ids":[eid]}):
                     supabase.table("emails").update({"status":"awaiting_proposal"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
@@ -965,7 +965,7 @@ def trigger_process():
         if prop:
             for eid in [r["id"] for r in prop]:
                 # Call the correct endpoint with /generate-proposal
-                if call_edge("/functions/v1/clever-service/generate-proposal", {"email_ids":[eid]}):
+                if call_edge("/generate-proposal", {"email_ids":[eid]}):
                     supabase.table("emails").update({"status":"ready_to_send"}).eq("id", eid).execute()
                     all_processed.append(eid)
                 else:
