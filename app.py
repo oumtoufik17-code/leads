@@ -23,7 +23,10 @@ from fimap import send_email_smtp, fetch_emails_imap
 from flask_cors import CORS  
 
 from cryptography.fernet import Fernet
-
+# Add these imports at the top
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 
 
 # ── single Flask app & blueprint registration ──
@@ -1151,9 +1154,9 @@ Thank you,
 The Team"""
 
 
-# Add this import at the top of your file
-from supabase.lib.storage import StorageException
 
+
+# Update the send_auto_response function to include both text and attachment
 # Update the send_auto_response function to include both text and attachment
 def send_auto_response(user_id, to_email, subject, body, attach_pdf=False):
     """
@@ -1199,14 +1202,14 @@ def send_auto_response(user_id, to_email, subject, body, attach_pdf=False):
             try:
                 # Download PDF from Supabase bucket
                 # Replace 'your-bucket-name' and 'your-file-name.pdf' with your actual values
-                pdf_data = supabase.storage.from_('your-bucket-name').download('your-file-name.pdf')
+                pdf_data = supabase.storage.from_('milch').download('playbook-2025.pdf')
                 
                 pdf_part = MIMEBase('application', 'octet-stream')
                 pdf_part.set_payload(pdf_data)
                 encoders.encode_base64(pdf_part)
-                pdf_part.add_header('Content-Disposition', 'attachment', filename='Confirmation.pdf')
+                pdf_part.add_header('Content-Disposition', 'attachment', filename='7-day-conversion-system.pdf')
                 message.attach(pdf_part)
-            except StorageException as e:
+            except Exception as e:  # Catch any exception, not just StorageException
                 app.logger.error(f"Failed to fetch PDF from Supabase: {str(e)}")
                 # Continue without attachment if PDF fetch fails
 
@@ -1217,6 +1220,7 @@ def send_auto_response(user_id, to_email, subject, body, attach_pdf=False):
     except Exception as e:
         app.logger.error(f"Gmail API auto-response failed: {str(e)}")
         return False
+
 
 # Update the check_keywords_and_auto_respond function
 def check_keywords_and_auto_respond(email_id, original_content, user_id, sender_email):
