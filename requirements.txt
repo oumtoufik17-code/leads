@@ -14,7 +14,7 @@ google-auth==2.26.1
 google-auth-oauthlib==1.0.0
 google-api-python-client==2.101.0
 
-pandas==1.5.3
+pandas==2.2.2
 openpyxl==3.0.10  # For Excel support
 
 
