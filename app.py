@@ -5,7 +5,7 @@ import requests
 import uuid
 
 from flask import abort, Flask, render_template, request, redirect, jsonify, make_response, url_for, session
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from email.mime.text import MIMEText
 
 from supabase import create_client, Client
