@@ -1272,7 +1272,93 @@ def check_keywords_and_auto_respond(email_id, original_content, user_id, sender_
     
     return False
 
+import csv
+from io import TextIOWrapper
+from openpyxl import load_workbook
 
+@app.route("/import_leads", methods=["GET", "POST"])
+def import_leads():
+    user_id = _require_user()
+    if request.method == "GET":
+        return render_template("import_leads.html", user_id=user_id)
+    else:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        try:
+            # Check file extension
+            if file.filename.endswith('.csv'):
+                # Process CSV file
+                csv_file = TextIOWrapper(file, encoding='utf-8')
+                reader = csv.DictReader(csv_file)
+                rows = list(reader)
+            elif file.filename.endswith(('.xlsx', '.xls')):
+                # Process Excel file
+                wb = load_workbook(file)
+                ws = wb.active
+                
+                # Get headers
+                headers = [cell.value for cell in ws[1]]
+                
+                # Get data rows
+                rows = []
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    rows.append(dict(zip(headers, row)))
+            else:
+                return jsonify({"error": "Invalid file type. Please upload CSV or Excel."}), 400
+            
+            # Check required columns
+            required_columns = ['name', 'Last name', 'Recipient', 'city', 'brokerage', 'service', 'Email Sent']
+            if not all(col in rows[0].keys() for col in required_columns):
+                return jsonify({"error": "Missing required columns. Ensure file has: name, Last name, Recipient, city, brokerage, service, Email Sent"}), 400
+            
+            # Process each row
+            for row in rows:
+                # Parse email_sent date
+                email_sent_str = row.get('Email Sent', '')
+                try:
+                    if email_sent_str:
+                        email_sent = datetime.strptime(str(email_sent_str), '%Y-%m-%d %H:%M:%S')
+                    else:
+                        email_sent = datetime.utcnow()
+                except ValueError:
+                    email_sent = datetime.utcnow()
+                
+                lead_data = {
+                    'user_id': user_id,
+                    'first_name': row.get('name'),
+                    'last_name': row.get('Last name'),
+                    'email': row.get('Recipient'),
+                    'city': row.get('city'),
+                    'brokerage': row.get('brokerage'),
+                    'service': row.get('service'),
+                    'email_sent': email_sent.isoformat()
+                }
+                
+                # Insert lead
+                response = supabase.table('leads').insert(lead_data).execute()
+                if response.data:
+                    lead_id = response.data[0]['id']
+                    # Schedule follow-up emails
+                    for step, seq in enumerate(FOLLOW_UP_SEQUENCE):
+                        scheduled_at = email_sent + timedelta(days=seq['delay_days'])
+                        follow_up_data = {
+                            'lead_id': lead_id,
+                            'sequence_step': step,
+                            'scheduled_at': scheduled_at.isoformat(),
+                            'status': 'pending'
+                        }
+                        supabase.table('lead_follow_ups').insert(follow_up_data).execute()
+            
+            return jsonify({"message": "Leads imported successfully"}), 200
+        
+        except Exception as e:
+            app.logger.error(f"Error importing leads: {str(e)}")
+            return jsonify({"error": "Failed to import leads. Please check the file format."}), 500
 
 
 # ── Final entry point ──
