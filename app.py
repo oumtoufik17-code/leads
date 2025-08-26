@@ -1166,7 +1166,47 @@ def trigger_process():
                 failed.append(em_id)
 
             # --- Process Lead Follow-ups ---
-try:
+        try:
+    # Fetch pending follow-ups where scheduled_at <= now
+    follow_ups = supabase.table('lead_follow_ups') \
+        .select('id, lead_id, sequence_step') \
+        .eq('status', 'pending') \
+        .lte('scheduled_at', datetime.utcnow().isoformat()) \
+        .execute()
+    
+    for follow_up in follow_ups.data:
+        follow_up_id = follow_up['id']
+        lead_id = follow_up['lead_id']
+        step = follow_up['sequence_step']
+        
+        # Get lead details
+        lead = supabase.table('leads').select('*').eq('id', lead_id).single().execute()
+        if not lead.data:
+            app.logger.error(f"Lead not found for follow-up {follow_up_id}")
+            continue
+        lead_data = lead.data
+        
+        # Get user_id from lead
+        user_id = lead_data['user_id']
+        
+        # Get template for this step
+        if step >= len(FOLLOW_UP_SEQUENCE):
+            app.logger.error(f"Invalid sequence step {step} for follow-up {follow_up_id}")
+            continue
+        template = FOLLOW_UP_SEQUENCE[step]
+        subject = template['subject']
+        body = template['body']
+        
+        # Replace placeholders with lead data
+        for key, value in lead_data.items():
+            if value is None:
+                value = ''
+            placeholder = '{' + key + '}'
+            subject = subject.replace(placeholder, str(value))
+            body = body.replace(placeholder, str(value))
+        
+        # Send email using SMTP or Gmail API
+        try:
     # Fetch pending follow-ups where scheduled_at <= now
     follow_ups = supabase.table('lead_follow_ups') \
         .select('id, lead_id, sequence_step') \
