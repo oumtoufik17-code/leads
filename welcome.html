@@ -185,7 +185,7 @@
         const btn = this;
         const originalText = btn.innerHTML;
         btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Redirecting...';
-        btn.disabled = false;
+        btn.disabled = true;
         
         // In a real scenario, you would send this data to your server
         console.log('Demo requested for email:', email);
@@ -194,7 +194,7 @@
         setTimeout(() => {
             alert('Thank you! Redirecting to our live demo page...');
             // In a real scenario, you would redirect to your demo page
-            // window.location.href = 'demo.html';
+             window.location.href = 'replyzeai.vercel.app/demo';
             btn.innerHTML = originalText;
             btn.disabled = false;
         }, 1500);
