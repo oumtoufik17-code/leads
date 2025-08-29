@@ -1,0 +1,42 @@
+# .github/workflows/process_followups.yml
+name: Follow-up Email Processor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 15 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  process-followups:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Debug - Check if token is set
+        run: |
+          if [ -z "${{ secrets.PROCESS_SECRET_TOKEN }}" ]; then
+            echo "ERROR: PROCESS_SECRET_TOKEN is not set!"
+            exit 1
+          else
+            echo "PROCESS_SECRET_TOKEN is set"
+          fi
+
+      - name: Trigger Follow-up Processing Endpoint
+        run: |
+          echo "Calling: https://leads-ykkj.onrender.com/process_followups?token=[REDACTED]"
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://leads-ykkj.onrender.com/process_followups?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
+          echo "HTTP status: $HTTP_STATUS"
+          
+          # For debugging, let's also get the response body
+          RESPONSE=$(curl -s "https://leads-ykkj.onrender.com/process_followups?token=${{ secrets.PROCESS_SECRET_TOKEN }}")
+          echo "Response: $RESPONSE"
+          
+          if [[ "$HTTP_STATUS" != "200" && "$HTTP_STATUS" != "204" ]]; then
+            echo "::error::Follow-up processing failed with status: $HTTP_STATUS"
+            exit 1
+          fi
