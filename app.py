@@ -1508,6 +1508,155 @@ def import_leads():
             app.logger.error(f"Error importing leads: {str(e)}")
             return jsonify({"error": "Failed to import leads. Please check the file format."}), 500
 
+@app.route("/process_followups", methods=["GET"])
+def trigger_process_followups():
+    # Similar token validation as /process endpoint
+    token = request.args.get("token")
+    expected_token = os.environ.get("PROCESS_SECRET_TOKEN")
+    
+    if not expected_token or token != expected_token:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        # Process follow-ups independently
+        process_followups()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        app.logger.error(f"Error in follow-up processing: {str(e)}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+def process_followups():
+    """Process follow-up emails independently"""
+    try:
+        # Fetch pending follow-ups where scheduled_at <= now
+        follow_ups = supabase.table('lead_follow_ups') \
+            .select('id, lead_id, sequence_step, scheduled_at') \
+            .eq('status', 'pending') \
+            .lte('scheduled_at', datetime.utcnow().isoformat()) \
+            .execute()
+        
+        app.logger.info(f"Found {len(follow_ups.data)} follow-ups to process")
+        
+        for follow_up in follow_ups.data:
+            follow_up_id = follow_up['id']
+            lead_id = follow_up['lead_id']
+            step = follow_up['sequence_step']
+            scheduled_at = follow_up['scheduled_at']
+            
+            # Check if this follow-up is overdue (more than 24 hours past scheduled time)
+            scheduled_time = datetime.fromisoformat(scheduled_at.replace('Z', '+00:00'))
+            time_diff = datetime.utcnow() - scheduled_time
+            if time_diff > timedelta(hours=24):
+                app.logger.warning(f"Follow-up {follow_up_id} is more than 24 hours overdue, skipping")
+                supabase.table('lead_follow_ups').update({
+                    'status': 'skipped',
+                    'error_message': 'Overdue by more than 24 hours'
+                }).eq('id', follow_up_id).execute()
+                continue
+            
+            # Get lead details
+            lead = supabase.table('leads').select('*').eq('id', lead_id).single().execute()
+            if not lead.data:
+                app.logger.error(f"Lead not found for follow-up {follow_up_id}")
+                supabase.table('lead_follow_ups').update({
+                    'status': 'failed',
+                    'error_message': 'Lead not found'
+                }).eq('id', follow_up_id).execute()
+                continue
+                
+            lead_data = lead.data
+            user_id = lead_data['user_id']
+            
+            # Get template for this step
+            if step >= len(FOLLOW_UP_SEQUENCE):
+                app.logger.error(f"Invalid sequence step {step} for follow-up {follow_up_id}")
+                supabase.table('lead_follow_ups').update({
+                    'status': 'failed',
+                    'error_message': f'Invalid sequence step {step}'
+                }).eq('id', follow_up_id).execute()
+                continue
+                
+            template = FOLLOW_UP_SEQUENCE[step]
+            subject = template['subject']
+            body = template['body']
+            
+            # Replace placeholders with lead data
+            for key, value in lead_data.items():
+                if value is None:
+                    value = ''
+                placeholder = '{' + key + '}'
+                subject = subject.replace(placeholder, str(value))
+                body = body.replace(placeholder, str(value))
+            
+            # Send email using SMTP or Gmail API
+            try:
+                # Check if user has SMTP credentials
+                prof = supabase.table("profiles") \
+                    .select("smtp_email, smtp_enc_password, smtp_host") \
+                    .eq("id", user_id).single().execute()
+                    
+                if prof.data and prof.data.get("smtp_email") and prof.data.get("smtp_enc_password"):
+                    # Use SMTP
+                    smtp_email = prof.data["smtp_email"]
+                    smtp_pass = fernet.decrypt(prof.data["smtp_enc_password"].encode()).decode()
+                    smtp_host = prof.data.get("smtp_host", "smtp.gmail.com")
+                    send_email_smtp(
+                        smtp_email,
+                        smtp_pass,
+                        lead_data['email'],
+                        subject,
+                        body,
+                        smtp_host=smtp_host
+                    )
+                else:
+                    # Use Gmail API
+                    tok_resp = supabase.table("gmail_tokens") \
+                        .select("credentials") \
+                        .eq("user_id", user_id) \
+                        .order("created_at", desc=True) \
+                        .limit(1) \
+                        .execute()
+                        
+                    if not tok_resp.data:
+                        raise ValueError("No Gmail token found")
+                        
+                    cd = tok_resp.data[0]["credentials"]
+                    creds = Credentials(
+                        token=cd["token"],
+                        refresh_token=cd["refresh_token"],
+                        token_uri=cd["token_uri"],
+                        client_id=cd["client_id"],
+                        client_secret=cd["client_secret"],
+                        scopes=cd["scopes"],
+                    )
+                    if creds.expired and creds.refresh_token:
+                        creds.refresh(GoogleRequest())
+                        
+                    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+                    msg = MIMEText(body, 'html')
+                    msg['To'] = lead_data['email']
+                    msg['Subject'] = subject
+                    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+                    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+                
+                # Update follow-up as sent
+                supabase.table('lead_follow_ups').update({
+                    'sent_at': datetime.utcnow().isoformat(),
+                    'status': 'sent'
+                }).eq('id', follow_up_id).execute()
+                app.logger.info(f"Successfully sent follow-up {follow_up_id}")
+                
+            except Exception as e:
+                app.logger.error(f"Failed to send follow-up email: {str(e)}")
+                supabase.table('lead_follow_ups').update({
+                    'status': 'failed',
+                    'error_message': str(e)
+                }).eq('id', follow_up_id).execute()
+
+    except Exception as e:
+        app.logger.error(f"Error in process_followups: {str(e)}")
+        raise 
+
 
 # ── Final entry point ──
 if __name__ == "__main__":
